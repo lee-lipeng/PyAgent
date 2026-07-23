@@ -34,7 +34,7 @@ class AgentSettings(BaseModel):
     tool_execution: str = "parallel"  # "parallel" | "sequential"
 
     #: 模型上下文窗口大小（token 数），用于压缩触发判断
-    context_window: int = 0
+    context_window: int = 128000
     #: 压缩触发阈值（0~1），达到 context_window * threshold 时触发压缩
     compaction_threshold: float = 0.8
     #: 压缩时保留尾部消息数（不被压缩的最近消息数）
