@@ -6,7 +6,7 @@ AI Agent 工具包，借鉴 [Pi](https://github.com/earendil-works/pi) 设计理
 
 - **核心极简**：只做 Agent loop + 工具执行 + 事件流
 - **LLM 是最强大的工具**：不用规则包装死，让 LLM 自己看页面、自己写代码
-- **事件驱动**：所有状态变化通过事件总线暴露，Logging / Tracing / Permission / Metrics 全是 Hook
+- **事件驱动**：所有状态变化通过事件总线暴露，Logging / Permission 全是 Hook
 - **零配置自动加载**：模块扫描 + 反射 + 装饰器，Tool / Skill / Hook 自动发现注册
 - **litellm 做 LLM 抽象**，不重复造轮子
 

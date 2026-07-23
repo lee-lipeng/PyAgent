@@ -61,6 +61,24 @@ class LogSettings(BaseModel):
     filename: str = "pyagent.log"  # 日志文件名
 
 
+class HooksSettings(BaseModel):
+    """内置 Hook 配置。
+
+    控制 Runtime 在 setup 时自动注册哪些横切关注点。
+    用户也可以通过禁用 ``enabled`` 完全跳过内置 hook，
+    然后在外部自行调用 ``setup_*_hooks`` 来定制。
+    """
+
+    # 总开关False 时不注册任何内置 hook
+    enabled: bool = True
+    # 是否注册日志 hook(在 runtime / agent / tool 关键节点输出日志)
+    enable_logging: bool = True
+    # 是否注册权限 hook(在 BEFORE_TOOL 拦截被禁用的工具)
+    enable_permission: bool = True
+    # 被禁用的工具名集合(空集合表示不禁用任何工具)
+    blocked_tools: set[str] = Field(default_factory=set)
+
+
 class Settings(BaseSettings):
     """PyAgent 全局配置。
 
@@ -77,6 +95,7 @@ class Settings(BaseSettings):
     agent: AgentSettings = Field(default_factory=AgentSettings)
     session: SessionSettings = Field(default_factory=SessionSettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    hooks: HooksSettings = Field(default_factory=HooksSettings)
 
     # 是否启用内置工具
     enable_builtin_tools: bool = True
