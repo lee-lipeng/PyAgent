@@ -1,13 +1,19 @@
 """SessionStore — 会话文件管理。
 
 管理会话文件的保存、加载、列表、删除。
-每个会话保存为 `<sessions_dir>/<id>.json`。
+每个会话保存为 ``<sessions_dir>/<id>.json``。
+
+借鉴 Pi Agent 设计：
+- SessionStore 负责 persistent 会话的落盘 / 恢复
+- ephemeral session（``mode="ephemeral"``）不经过本 store，纯内存单次任务
+- 所有 ``save/load/delete`` 调用对 ephemeral 会话都是 no-op
 """
 
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from pyagent.session.types import Session, SessionMetadata
 from pyagent.utils.logger import get_logger
@@ -30,12 +36,18 @@ class SessionStore:
         """生成新的会话 ID。"""
         return uuid.uuid4().hex[:12]
 
-    def save(self, session: Session) -> Path:
+    def save(self, session: Session) -> Path | None:
         """保存会话到文件。
 
+        ephemeral 会话不落盘，直接返回 None。
+
         Returns:
-            保存的文件路径。
+            保存的文件路径；ephemeral 会话返回 None。
         """
+        if session.mode == "ephemeral":
+            logger.debug("ephemeral 会话跳过保存: %s", session.metadata.id)
+            return None
+
         path = self._dir / f"{session.metadata.id}.json"
         session.to_file(path)
         logger.debug("保存会话: %s", path)
@@ -86,8 +98,9 @@ class SessionStore:
         session_id: str | None = None,
         context_window: int = 0,
         compaction_threshold: float = 0.8,
+        mode: Literal["persistent", "ephemeral"] = "persistent",
     ) -> Session:
-        """创建并保存新会话。
+        """创建新会话。
 
         Args:
             model: 使用的模型名。
@@ -96,6 +109,8 @@ class SessionStore:
             session_id: 指定 ID，不传则自动生成。
             context_window: 模型上下文窗口大小（token 数）。
             compaction_threshold: 压缩触发阈值（0~1）。
+            mode: 持久化模式（默认 ``persistent``）。
+                ``ephemeral`` 时不落盘，只返回内存对象。
 
         Returns:
             新创建的 Session 对象。
@@ -108,6 +123,6 @@ class SessionStore:
             title=title,
             context_window=context_window,
             compaction_threshold=compaction_threshold,
+            mode=mode,
         )
-        self.save(session)
         return session
