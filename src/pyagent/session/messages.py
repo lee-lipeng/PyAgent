@@ -31,7 +31,10 @@ class UserMessage(BaseModel):
 
     def to_llm_message(self) -> dict[str, Any]:
         """投影为 LLM 格式。"""
-        return {"role": "user", "content": self.content}
+        return {
+            "role": "user",
+            "content": self.content
+        }
 
 
 class AssistantMessage(BaseModel):
@@ -87,9 +90,9 @@ class CompactionSummaryMessage(BaseModel):
 
     type: Literal["compaction_summary"] = "compaction_summary"
     content: str
-    #: 被压缩的消息范围（起始 ~ 结束的 entry ID）
+    # 被压缩的消息范围（起始 ~ 结束的 entry ID）
     compacted_range: str = ""
-    #: 生成摘要时的 token 数
+    # 生成摘要时的 token 数
     summary_tokens: int = 0
 
     def to_llm_message(self) -> dict[str, Any]:
@@ -141,7 +144,10 @@ class CustomMessage(BaseModel):
 
     def to_llm_message(self) -> dict[str, Any]:
         """投影为 LLM 格式。"""
-        return {"role": self.role, "content": self.content}
+        return {
+            "role": self.role,
+            "content": self.content
+        }
 
 
 class Message(BaseModel):

@@ -111,7 +111,7 @@ Runtime.run(query, session?, on_chunk?)
    │           ├─ ctx.is_cancelled() → break
    │           ├─ CompactionManager.maybe_compact(session)
    │           ├─ ContextBuilder.build(session) → messages
-   │           ├─ hooks.emit(LOOP_START / BEFORE_LLM)
+   │           ├─ hooks.emit(BEFORE_LLM)
    │           ├─ LLMClient.stream_and_collect(messages, tools)
    │           │     └─ for delta in stream: on_chunk(delta)
    │           ├─ hooks.emit(AFTER_LLM)
@@ -127,7 +127,6 @@ Runtime.run(query, session?, on_chunk?)
    │           │
    │           └─ if steering queue non-empty: pop → 注入下一轮 user message
    │
-   ├─ hooks.emit(LOOP_END)
    └─ return LoopResult(success, final_response, turns, stop_reason, error)
 ```
 
@@ -319,21 +318,20 @@ result = await task
 ```text
 Runtime.run(query, session, on_chunk)
     └─ AgentLoop.run(query, session, on_chunk, ctx)
-        ├─ emit loop_start
         ├─ while turns < max_turns:
-        │   ├─ ctx.is_cancelled()? → cancelled
-        │   ├─ 阈值/overflow? → CompactionManager.compact_session(force=True)
-        │   ├─ ContextBuilder.build()  # system + 历史 + query
-        │   ├─ emit before_llm
-        │   ├─ LLMClient.stream_and_collect()  # 流式
-        │   │   └─ on_chunk(delta) → 用户回调
-        │   ├─ emit after_llm
-        │   ├─ 无 tool_calls → drain steering → completed
-        │   └─ 有 tool_calls → ToolExecutor.execute_batch()
-        │       ├─ emit before_tool / after_tool
-        │       ├─ turn 边界 drain steering
-        │       └─ 全部 terminate? → terminated
-        └─ emit loop_end
+            ├─ ctx.is_cancelled()? → cancelled
+            ├─ 阈值/overflow? → CompactionManager.compact_session(force=True)
+            ├─ ContextBuilder.build()  # system + 历史 + query
+            ├─ emit before_llm
+            ├─ LLMClient.stream_and_collect()  # 流式
+            │   └─ on_chunk(delta) → 用户回调
+            ├─ emit after_llm
+            ├─ 无 tool_calls → drain steering → completed
+            └─ 有 tool_calls → ToolExecutor.execute_batch()
+                ├─ emit before_tool / after_tool
+                ├─ turn 边界 drain steering
+                └─ 全部 terminate? → terminated
+
 ```
 
 返回值 `LoopResult`：

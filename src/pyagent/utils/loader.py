@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sys
 import importlib.util
 from pathlib import Path
 from types import ModuleType
@@ -41,6 +42,7 @@ def import_module_from_path(path: Path, module_name: str | None = None) -> Modul
         raise ImportError(f"无法创建模块 spec: {path}")
 
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
     except Exception as exc:

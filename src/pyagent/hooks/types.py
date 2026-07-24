@@ -2,6 +2,7 @@
 
 EventType 覆盖整个 Runtime 生命周期的关键节点，
 任何模块都可以 emit 事件，HookManager 不关心谁在 emit。
+TODO: HOOK模块优化
 """
 
 from __future__ import annotations
@@ -18,10 +19,6 @@ class EventType(str, Enum):  # noqa: UP042
     命名规则：<模块>_<动作>，全大写下划线分隔。
     """
 
-    # ── Runtime 生命周期 ──
-    RUNTIME_START = "runtime_start"
-    RUNTIME_SHUTDOWN = "runtime_shutdown"
-
     # ── Agent 生命周期 ──
     AGENT_START = "agent_start"
     AGENT_END = "agent_end"
@@ -29,10 +26,6 @@ class EventType(str, Enum):  # noqa: UP042
     AGENT_STEER = "agent_steer"
     #: 用户中止当前运行（abort）
     AGENT_ABORT = "agent_abort"
-
-    # ── Loop 生命周期 ──
-    LOOP_START = "loop_start"
-    LOOP_END = "loop_end"
 
     # ── LLM 调用 ──
     BEFORE_LLM = "before_llm"

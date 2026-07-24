@@ -24,10 +24,6 @@ if TYPE_CHECKING:
 
 def setup_logging_hooks(hooks: HookManager, logger: logging.Logger) -> None:
     """注册日志 Hook：在关键节点输出日志。"""
-
-    async def on_runtime_start(event: Event) -> None:
-        logger.debug("Runtime 启动")
-
     async def on_agent_start(event: Event) -> None:
         logger.debug("Agent 启动")
 
@@ -44,7 +40,6 @@ def setup_logging_hooks(hooks: HookManager, logger: logging.Logger) -> None:
         else:
             logger.debug(f"工具 {event.payload.get('tool_name')} 调用完成")
 
-    hooks.on(EventType.RUNTIME_START, on_runtime_start)
     hooks.on(EventType.AGENT_START, on_agent_start)
     hooks.on(EventType.AGENT_END, on_agent_end)
     hooks.on(EventType.BEFORE_TOOL, on_before_tool)
