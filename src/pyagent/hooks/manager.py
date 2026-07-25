@@ -1,101 +1,123 @@
-"""HookManager — 通用事件总线。
+"""HookManager — 统一事件分发器。
 
-核心设计：
-- emit(event): 触发事件，按注册顺序 await 所有 handler
-- on(type, handler): 订阅事件，返回 unsubscribe 函数
-- HookManager 不知道任何上游模块，只做事件分发
+设计哲学
+---------
+HookManager 只暴露一个核心动作 ``dispatch``，内部按 handler 返回值自动
+区分三种语义：
 
-横切关注点（Logging / Permission）
-通过订阅事件实现，不需要修改任何业务代码。
+- 返回 ``HookControl(cancel=True)``   → 取消派发，结果的 ``cancelled=True``
+- 返回其它非 None 值                  → 替换当前值（链式 transform）
+- 返回 ``None``                       → 不影响，继续派发下一个 handler
+
+Handler 协议（推荐）::
+
+    async def my_hook(event: Event):
+        if event.get("tool_name") == "blocked":
+            return HookControl.cancel_with("工具被禁用")
+        # 想改 messages 时直接返回新值
+        return [*event.get("value", []), "injected"]
+
+    hooks.on(EventType.BEFORE_LLM, my_hook)
 """
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any
 
-from pyagent.hooks.types import Event, EventType
+from pyagent.hooks.types import DispatchResult, Event, EventType, HookControl
 from pyagent.utils.logger import get_logger
 
-if TYPE_CHECKING:
-    pass
-
 logger = get_logger(__name__)
-
-# 事件处理器类型：接收 Event，返回 None（同步或异步）
-HookHandler = Callable[[Event], Awaitable[None] | None]
+HookHandler = Callable[[Event], Any]
 
 
 class HookManager:
-    """通用事件总线。
+    """按注册顺序执行 Hook，并提供中间件风格的派发语义。
 
-    用法::
-
-        hooks = HookManager()
-
-        # 订阅
-        def on_tool_start(event: Event):
-            print(f"工具开始: {event.get('tool_name')}")
-
-        unsub = hooks.on(EventType.BEFORE_TOOL, on_tool_start)
-
-        # 触发
-        await hooks.emit(Event(
-            type=EventType.BEFORE_TOOL,
-            payload={"tool_name": "read_file", "args": {"path": "a.txt"}},
-        ))
-
-        # 取消订阅
-        unsub()
+    支持一次性 hook 注册与取消订阅，handler 同步/异步皆可。
     """
 
     def __init__(self) -> None:
         self._handlers: dict[EventType, list[HookHandler]] = defaultdict(list)
 
     def on(self, event_type: EventType, handler: HookHandler) -> Callable[[], None]:
-        """订阅事件。
+        """注册 handler；重复注册同一函数不会产生重复执行。
 
         Args:
             event_type: 要订阅的事件类型。
-            handler: 事件处理器，可以是同步或异步函数。
+            handler: 事件回调，签名 ``handler(event: Event) -> Any``。
 
         Returns:
-            取消订阅的函数，调用后移除该 handler。
+            unsubscribe 函数，调用后移除该 handler。
         """
-        self._handlers[event_type].append(handler)
         handlers = self._handlers[event_type]
+        if handler not in handlers:
+            handlers.append(handler)
+        removed = False
 
-        def _unsubscribe() -> None:
+        def unsubscribe() -> None:
+            nonlocal removed
+            if removed:
+                return
+            removed = True
             if handler in handlers:
                 handlers.remove(handler)
 
-        return _unsubscribe
+        return unsubscribe
 
-    async def emit(self, event: Event) -> None:
-        """触发事件，按注册顺序调用所有 handler。
+    async def dispatch[T](
+        self,
+        event: Event,
+        initial: T | None = None,
+    ) -> DispatchResult[T]:
+        """统一事件派发入口。
 
-        同步 handler 会被包装为协程，保证调用顺序一致。
+        按 handler 注册顺序遍历 ``self._handlers[event.type]``，
+        每个 handler 同步 / 异步执行后根据返回值决定后续动作：
 
-        异常处理策略:
-            - ``PermissionError`` 作为"控制信号"立即向上抛,
-              不被吞,保证权限 hook 拦截工具调用;
-            - 其他 ``Exception`` 记录日志后继续执行后续 handler,
-              不影响事件传播。
+        - HookControl(cancel=True)：停止派发，结果标记 cancelled=True
+        - 其它非 None：替换 current 并继续派发下一个 handler
+        - None：不修改 current，继续派发下一个 handler
+
+        所有 handler 抛出的 Exception（非PermissionError）都会被
+        记录并吞掉，保证单点失败不中断整条链。
+
+        Args:
+            event: 事件对象。
+            initial: 链初始值（无 handler 返回替换值时由它兜底）。
+
+        Returns:
+            DispatchResult，包含 cancelled / cancel_reason / value。
         """
-        handlers = self._handlers.get(event.type, [])
-        if not handlers:
-            return
+        # 当前值会随 handler 返回值更新；handler 通过 event.payload["value"]
+        # 读取上一环节结果（注意：handler 不应主动修改 payload，仅读取）。
+        current: Any = initial
+        event.payload["value"] = current
 
-        for handler in handlers:
+        for handler in tuple(self._handlers.get(event.type, ())):
             try:
                 result = handler(event)
-                # 同步 handler 返回 None，异步返回 coroutine
-                if asyncio.iscoroutine(result):
-                    await result
+                if inspect.isawaitable(result):
+                    result = await result
+
+                if isinstance(result, HookControl):
+                    # 取消信号直接短路，不再执行后续 handler
+                    return DispatchResult(
+                        cancelled=result.cancel,
+                        cancel_reason=result.reason,
+                        value=current,
+                    )
+                if result is not None:
+                    # 链式 transform：把返回值作为下一环节的 current
+                    current = result
+                    event.payload["value"] = current
             except PermissionError:
-                # 控制信号:权限 hook 拦截工具调用,需要让调用方 catch
+                # 权限错误向上抛出，让 Runtime 决定如何处理（abort / 降级）
                 raise
             except Exception:
-                logger.exception("事件处理器执行失败: type=%s", event.type.value)
+                logger.exception(f"事件处理器执行失败: type={event.type.value}")
+
+        return DispatchResult(cancelled=False, cancel_reason="", value=current)

@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-import sys
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 

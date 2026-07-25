@@ -69,14 +69,29 @@ class HooksSettings(BaseModel):
     然后在外部自行调用 ``setup_*_hooks`` 来定制。
     """
 
-    # 总开关False 时不注册任何内置 hook
+    # 总开 False 时不注册任何内置 hook
     enabled: bool = True
-    # 是否注册日志 hook(在 runtime / agent / tool 关键节点输出日志)
+    # 是否注册日志 hook（在 agent / tool 关键节点输出日志）
     enable_logging: bool = True
-    # 是否注册权限 hook(在 BEFORE_TOOL 拦截被禁用的工具)
+    # 是否注册权限 hook（在 BEFORE_TOOL 拦截被禁用的工具）
     enable_permission: bool = True
-    # 被禁用的工具名集合(空集合表示不禁用任何工具)
+    # 被禁用的工具名集合（空集合表示不禁用任何工具）
     blocked_tools: set[str] = Field(default_factory=set)
+
+    # 是否注册 Token 用量聚合 hook（AFTER_LLM 自动累加到 session）
+    enable_usage_tracking: bool = True
+    # 是否注册轮次计数 hook（BEFORE_LLM 自动自增 turn_count）
+    enable_turn_counting: bool = True
+    # 是否注册重复工具调用守卫 hook（连续相同调用超过阈值时拦截）
+    enable_duplicate_guard: bool = True
+    # 重复调用拦截阈值（连续触发次数）
+    duplicate_guard_threshold: int = 3
+    # 是否注册工具结果截断 hook（防止超长输出撑爆上下文）
+    enable_result_truncation: bool = True
+    # 工具结果最大字符数（超过则保留头尾各 1/4）
+    result_truncation_max_chars: int = 8000
+    # 是否注册会话自动落盘 hook（BEFORE_LLM 自动写盘）
+    enable_auto_save: bool = True
 
 
 class Settings(BaseSettings):
