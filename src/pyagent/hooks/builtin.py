@@ -17,7 +17,7 @@
 
         hooks = HookManager()
         setup_logging_hooks(hooks, logger)
-        setup_usage_tracking_hook(hooks, session)
+        setup_usage_tracking_hook(hooks, lambda: current_session)
         ...
 
 每个 setup_* 函数都是独立的，可单独启用或关闭，
@@ -86,13 +86,26 @@ def setup_permission_hooks(hooks: HookManager, blocked_tools: set[str]) -> None:
     hooks.on(EventType.BEFORE_TOOL, on_before_tool)
 
 
-def setup_usage_tracking_hook(hooks: HookManager, session: Session) -> None:
+def setup_usage_tracking_hook(
+    hooks: HookManager,
+    session_getter: Callable[[], Session | None],
+) -> None:
     """注册 Token 用量聚合 Hook：自动累加 LLM 调用产生的 token。
 
-    监听 AFTER_LLM 事件，从 payload.usage 读取 input/output tokens 后调用 session.add_usage()。
+    监听 AFTER_LLM 事件，从 payload.usage 读取 input/output tokens 后调用
+    session.add_usage()。
+
+    Args:
+        hooks: HookManager。
+        session_getter: 返回当前 session 的无参 callable。
+            必须在注册时延迟求值（每次 LLM 后取最新 session），
+            而非捕获某个具体 Session 实例（Runtime 每次 run 都会切换 session）。
     """
 
     async def on_after_llm(event: Event) -> None:
+        session = session_getter()
+        if session is None:
+            return
         usage = event.payload.get("usage") or {}
         input_tokens = int(usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("output_tokens") or 0)
@@ -102,14 +115,24 @@ def setup_usage_tracking_hook(hooks: HookManager, session: Session) -> None:
     hooks.on(EventType.AFTER_LLM, on_after_llm)
 
 
-def setup_turn_counting_hook(hooks: HookManager, session: Session) -> None:
+def setup_turn_counting_hook(
+    hooks: HookManager,
+    session_getter: Callable[[], Session | None],
+) -> None:
     """注册轮次计数 Hook：每轮 BEFORE_LLM 自增 turn_count。
 
     统一 dispatch API 下 BEFORE_LLM 每个 turn 只触发一次，
     因此 Handler 直接 ++ 即可，无需去重逻辑。
+
+    Args:
+        hooks: HookManager。
+        session_getter: 返回当前 session 的无参 callable。
     """
 
     async def on_before_llm(event: Event) -> None:
+        session = session_getter()
+        if session is None:
+            return
         session.increment_turn()
 
     hooks.on(EventType.BEFORE_LLM, on_before_llm)

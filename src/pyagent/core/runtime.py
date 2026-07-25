@@ -167,75 +167,30 @@ class Runtime:
                 level=log_cfg.level,
             )
 
-    def _register_session_hooks(self, session: Session) -> None:
-        """按当前 session 注册会话相关的内置 Hook。
-
-        受 Settings.hooks 中 enable_* 控制；
-        DuplicateGuard 计数 reset 在新 session 时调用，避免跨任务污染。
-
-        当前注册的 Hook：
-            - UsageTracking：AFTER_LLM → session.add_usage()
-            - TurnCounting：BEFORE_LLM → session.increment_turn()
-            - AutoSave：BEFORE_LLM → session_store.save(session)
-              使用 session_getter 延迟求值，每次 LLM 调用前取最新 session。
-        """
-        hook_cfg = self.settings.hooks
-        if not hook_cfg.enabled:
-            return
-
-        # DuplicateGuard 是会话无关的（闭包内独立 Counter），
-        # 但跨 session 时清零，避免上一次任务残留计数导致误判
-        if self._duplicate_guard_reset is not None:
-            self._duplicate_guard_reset()
-
-        from pyagent.hooks import (
-            setup_auto_save_hook,
-            setup_turn_counting_hook,
-            setup_usage_tracking_hook,
-        )
-
-        if hook_cfg.enable_usage_tracking:
-            setup_usage_tracking_hook(self.hooks, session)
-            logger.debug("Token 用量聚合 Hook 已启用 (session=%s)", session.metadata.id)
-
-        if hook_cfg.enable_turn_counting:
-            setup_turn_counting_hook(self.hooks, session)
-            logger.debug("轮次计数 Hook 已启用 (session=%s)", session.metadata.id)
-
-        # 自动落盘：通过 session_getter 延迟求值，避免闭包捕获过期 session
-        if hook_cfg.enable_auto_save:
-            setup_auto_save_hook(
-                self.hooks,
-                self.session_store,
-                self._current_session,
-            )
-            logger.debug(
-                "会话自动落盘 Hook 已启用 (session_store=%s)",
-                "enabled" if self.session_store else "disabled",
-            )
-
     def _setup_builtin_hooks(self) -> None:
-        """注册静态内置 Hook：Logging / Permission。
+        """注册所有内置 Hook：Logging / Permission / Usage / TurnCount / AutoSave /
+        DuplicateGuard / Truncation。
 
-        运行时内置 Hook（UsageTracking / TurnCounting / DuplicateGuard /
-        Truncation）依赖 session 实例，延后到 :meth:`run` 中按需注册。
+        所有 Hook 都在 ``setup()`` 一次性注册，运行期间不重复增册。
+        需要访问当前 session 的 Hook（UsageTracking / TurnCounting / AutoSave）
+        通过 ``self._current_session`` 延迟求值，每次事件触发时取最新实例。
+
+        跨 session 的状态清理（如 DuplicateGuard 计数 reset）由
+        ``Runtime.run`` 在每次开始时调用对应的 reset 闭包处理。
 
         受 ``Settings.hooks`` 控制:
             - ``hooks.enabled = False`` → 全部跳过
             - 单独的 enable_* / blocked_tools 决定细节
-
-        注册顺序与 ``Settings.hooks`` 中的字段顺序一致；
-        hooks 间彼此独立,关闭任一项不影响其余。
         """
-        from pyagent.hooks import (
-            setup_logging_hooks,
-            setup_permission_hooks,
-        )
-
         hook_cfg = self.settings.hooks
         if not hook_cfg.enabled:
             logger.debug("内置 Hook 已禁用 (Settings.hooks.enabled=False)")
             return
+
+        from pyagent.hooks import (
+            setup_logging_hooks,
+            setup_permission_hooks,
+        )
 
         if hook_cfg.enable_logging:
             setup_logging_hooks(self.hooks, logger)
@@ -245,6 +200,32 @@ class Runtime:
             logger.info(
                 "权限 Hook 已启用: 禁用工具 %s",
                 sorted(hook_cfg.blocked_tools),
+            )
+
+        # ── 依赖当前 session 的 Hook（全部用 session_getter 延迟求值） ──
+        from pyagent.hooks import (
+            setup_auto_save_hook,
+            setup_turn_counting_hook,
+            setup_usage_tracking_hook,
+        )
+
+        if hook_cfg.enable_usage_tracking:
+            setup_usage_tracking_hook(self.hooks, self._current_session)
+            logger.debug("Token 用量聚合 Hook 已启用")
+
+        if hook_cfg.enable_turn_counting:
+            setup_turn_counting_hook(self.hooks, self._current_session)
+            logger.debug("轮次计数 Hook 已启用")
+
+        if hook_cfg.enable_auto_save:
+            setup_auto_save_hook(
+                self.hooks,
+                self.session_store,
+                self._current_session,
+            )
+            logger.debug(
+                "会话自动落盘 Hook 已启用 (session_store=%s)",
+                "enabled" if self.session_store else "disabled",
             )
 
         # ── 会话无关的可立即注册的 Hook ──
@@ -367,9 +348,10 @@ class Runtime:
         if session is None:
             session = self.create_session(mode="ephemeral")
 
-        # 会话相关的 Hook 必须拿到 session 实例后才能注册；
-        # 放到此处而非 setup()，避免长期持有的 Hook 跨会话污染状态。
-        self._register_session_hooks(session)
+        # Hook 已在 setup() 一次性注册，这里只需要在切换 session 时
+        # reset 会话相关的状态（如 DuplicateGuard 跨任务计数）。
+        if self._duplicate_guard_reset is not None:
+            self._duplicate_guard_reset()
 
         # 创建ctx，供 steer/abort 在运行期间访问
         ctx = RuntimeContext(query=query, session=session)
