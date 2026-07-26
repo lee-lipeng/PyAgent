@@ -75,7 +75,7 @@ class Runtime:
         # DuplicateGuard 的 reset 闭包（per-Runtime，复用无需每次注册）
         self._duplicate_guard_reset: Callable[[], None] | None = None
 
-    def setup(self) -> None:
+    async def setup(self) -> None:
         """组装所有组件。
 
         按依赖顺序创建：
@@ -210,7 +210,7 @@ class Runtime:
         )
 
         if hook_cfg.enable_usage_tracking:
-            setup_usage_tracking_hook(self.hooks, self._current_session)
+            setup_usage_tracking_hook(self.hooks, self._current_session, self.loop)
             logger.debug("Token 用量聚合 Hook 已启用")
 
         if hook_cfg.enable_turn_counting:
@@ -342,7 +342,7 @@ class Runtime:
             LoopResult: 循环结果。
         """
         if not self._initialized:
-            self.setup()
+            await self.setup()
         assert self.loop is not None
 
         if session is None:

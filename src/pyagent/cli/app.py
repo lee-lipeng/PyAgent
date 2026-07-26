@@ -54,7 +54,7 @@ def _quiet_setup() -> Runtime:
     try:
         settings = load_settings()
         runtime = Runtime(settings)
-        runtime.setup()
+        asyncio.run(runtime.setup())
     finally:
         logging.disable(logging.NOTSET)
     return runtime
