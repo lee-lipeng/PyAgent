@@ -87,8 +87,9 @@ def setup_permission_hooks(hooks: HookManager, blocked_tools: set[str]) -> None:
 
 
 def setup_usage_tracking_hook(
-    hooks: HookManager,
-    session_getter: Callable[[], Session | None],
+        hooks: HookManager,
+        session_getter: Callable[[], Session | None],
+        loop: Any
 ) -> None:
     """注册 Token 用量聚合 Hook：自动累加 LLM 调用产生的 token。
 
@@ -100,6 +101,7 @@ def setup_usage_tracking_hook(
         session_getter: 返回当前 session 的无参 callable。
             必须在注册时延迟求值（每次 LLM 后取最新 session），
             而非捕获某个具体 Session 实例（Runtime 每次 run 都会切换 session）。
+        loop: AgentLoop对象，当LLM调用后若返回了具体的usage则更新当前上下文为此精确值。
     """
 
     async def on_after_llm(event: Event) -> None:
@@ -111,13 +113,14 @@ def setup_usage_tracking_hook(
         output_tokens = int(usage.get("output_tokens") or 0)
         if input_tokens or output_tokens:
             session.add_usage(input_tokens, output_tokens)
+            loop.context_usage._used = input_tokens + output_tokens
 
     hooks.on(EventType.AFTER_LLM, on_after_llm)
 
 
 def setup_turn_counting_hook(
-    hooks: HookManager,
-    session_getter: Callable[[], Session | None],
+        hooks: HookManager,
+        session_getter: Callable[[], Session | None],
 ) -> None:
     """注册轮次计数 Hook：每轮 BEFORE_LLM 自增 turn_count。
 
@@ -139,8 +142,8 @@ def setup_turn_counting_hook(
 
 
 def setup_duplicate_tool_call_guard(
-    hooks: HookManager,
-    threshold: int = 3,
+        hooks: HookManager,
+        threshold: int = 3,
 ) -> Callable[[], None]:
     """注册重复工具调用守卫 Hook：阻止 LLM 陷入死循环。
 
@@ -203,8 +206,8 @@ def setup_duplicate_tool_call_guard(
 
 
 def setup_tool_result_truncation_hook(
-    hooks: HookManager,
-    max_chars: int = 8000,
+        hooks: HookManager,
+        max_chars: int = 8000,
 ) -> None:
     """注册工具结果截断 Hook：防止超长结果撑爆上下文窗口。
 
@@ -247,9 +250,9 @@ def setup_tool_result_truncation_hook(
 
 
 def setup_auto_save_hook(
-    hooks: HookManager,
-    session_store: SessionStore | None,
-    session_getter: Callable[[], Session | None],
+        hooks: HookManager,
+        session_store: SessionStore | None,
+        session_getter: Callable[[], Session | None],
 ) -> None:
     """注册会话自动落盘 Hook：每次 LLM 调用前把当前会话写到磁盘。
 

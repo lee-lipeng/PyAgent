@@ -216,8 +216,6 @@ class AgentLoop:
                     )
                 ).value
 
-                # 累加 token 用量由 UsageTrackingHook 监听 AFTER_LLM 自动处理
-
                 # 构造 assistant 消息
                 assistant_msg: dict[str, Any] = {"role": "assistant"}
                 if response.content:

@@ -678,11 +678,20 @@ class REPL:
             items.append(("上下文窗口", str(ctx_window)))
             items.append(("压缩阈值", f"{int(threshold * 100)}% ({int(ctx_window * threshold)})"))
 
-            # 复用 ContextUsage：统一估算 + 进度条
-            usage = build_session_usage(self.session, default_limit=ctx_window)
-            pct = usage.percentage * 100
-            items.append(("当前上下文估算", f"{usage.used} ({pct:.1f}%)"))
-            items.append(("使用进度", self.renderer.progress_bar(usage.used, ctx_window)))
+            # 优先用ContextUsage 精确记录的 used。
+            loop = self.runtime.loop
+            live_usage = getattr(loop, "context_usage", None)
+            if live_usage is not None and live_usage.used > 0:
+                # 直接展示 loop 中记录的实时精确值
+                pct = live_usage.percentage * 100
+                items.append(("当前上下文估算", f"{live_usage.used} ({pct:.1f}%)"))
+                items.append(("使用进度", self.renderer.progress_bar(live_usage.used, ctx_window)))
+            else:
+                # 没有运行时记录，fallback 到估算
+                usage = build_session_usage(self.session, default_limit=ctx_window)
+                pct = usage.percentage * 100
+                items.append(("当前上下文估算", f"{usage.used} ({pct:.1f}%)"))
+                items.append(("使用进度", self.renderer.progress_bar(usage.used, ctx_window)))
         else:
             items.append(("上下文窗口", "[dim]未设置[/]"))
 
@@ -696,6 +705,12 @@ class REPL:
             )
 
         self.renderer.keyvalue(items, title="上下文使用详情")
+
+        self.renderer.console.print(
+            "  [dim]提示：累计 Tokens 是整个会话的账单（含已压缩历史）；"
+            "当前上下文估算 = 下次 LLM 请求的实际大小，两者为不同维度[/]"
+        )
+        self.renderer.console.print()
 
     async def _manual_compact(self) -> None:
         """手动触发上下文压缩。"""

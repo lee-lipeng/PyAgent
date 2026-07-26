@@ -15,13 +15,12 @@
                                           │
                               calculate_context_tokens()
 
-公开 API::
-
+公开 API:
     estimate_tokens(text)              单字符串 token 估算
     estimate_messages_tokens(messages) 消息列表 token 估算
     calculate_context_tokens(...)       精确值优先，否则估算
     estimate_session_context(session)   session → token 数（CLI 便利函数）
-    build_session_usage(session)        session → 已更新的 ContextUsage
+    build_session_usage(session, ...)   session → 已更新的 ContextUsage
     ContextUsage(limit, threshold)      上下文使用量监控器
 """
 
@@ -38,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: 启发式估算系数：约 4 个字符 ≈ 1 token（中英文混合的粗略值）
+# 启发式估算系数：约 4 个字符 ≈ 1 token（中英文混合的粗略值）
 CHARS_PER_TOKEN = 4
 
 
@@ -184,10 +183,6 @@ class ContextUsage:
         self._used = calculate_context_tokens(messages, last_usage)
         return self._used
 
-    def reset(self) -> None:
-        """重置使用量（压缩后调用）。"""
-        self._used = 0
-        self._last_usage = None
 
     def format_bar(self, width: int = 20) -> str:
         """格式化进度条字符串。
@@ -200,7 +195,7 @@ class ContextUsage:
             width: 进度条总宽度。
 
         Returns:
-            形如 ``context: 45% [████████░░░░░░░░░░░░]`` 的字符串。
+            形如 context: 45% [████████░░░░░░░░░░░░] 的字符串。
         """
         pct = min(1.0, self.percentage)
         filled = int(width * pct)
@@ -211,8 +206,8 @@ class ContextUsage:
 def estimate_session_context(session: Any) -> int:
     """估算 session 当前上下文的 token 数（便利函数）。
 
-    用于 REPL ``/context`` 等只读场景，避免手写：
-    ``estimate_messages_tokens(session.to_messages())``。
+    用于 REPL /context 等只读场景，避免手写：
+    estimate_messages_tokens(session.to_messages())。
 
     Args:
         session: :class:`pyagent.session.types.Session` 对象。
@@ -236,16 +231,19 @@ def build_session_usage(
     *,
     default_limit: int = 128000,
     default_threshold: float = 0.8,
+    last_usage: Usage | None = None,
 ) -> ContextUsage:
     """根据 session 元数据构造并 update() 一个 :class:`ContextUsage`。
 
-    用于 REPL ``/context`` 等只读场景，避免手写
-    ``ContextUsage(...) + usage.update(session.to_messages())``。
+    用于 REPL /context 等只读场景，避免手写
+    ContextUsage(...) + usage.update(session.to_messages())。
 
     Args:
         session: :class:`pyagent.session.types.Session` 对象。
-        default_limit: session 未设置 ``context_window`` 时使用的窗口大小。
-        default_threshold: session 未设置 ``compaction_threshold`` 时使用的阈值。
+        default_limit: session 未设置 context_window 时使用的窗口大小。
+        default_threshold: session 未设置 compaction_threshold 时使用的阈值。
+        last_usage: 最近一次 LLM 调用的精确 usage（可选，传入时优先使用精确值，
+            让 /context 在 loop 之外也能展示真实 token 数）。
 
     Returns:
         已 update() 过的 ContextUsage 实例。
@@ -264,5 +262,5 @@ def build_session_usage(
         messages = [{"role": "system", "content": metadata.system_prompt}, *messages]
 
     usage = ContextUsage(limit=limit, threshold=threshold)
-    usage.update(messages)
+    usage.update(messages, last_usage=last_usage)
     return usage
