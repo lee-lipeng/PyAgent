@@ -16,6 +16,7 @@ Runtime 是用户面对的入口，用户通过 Runtime 使用 Agent。
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -150,8 +151,65 @@ class Runtime:
         # 8. 注册会话无关的内置 Hook（Logging / Permission / DuplicateGuard / Truncation）
         self._setup_builtin_hooks()
 
+        # 9. 浏览器桥 (browser_* 工具) 自动连接
+        if self.settings.browser.enabled and self.settings.browser.auto_connect:
+            await self._init_browser_bridge()
+
         self._initialized = True
         logger.info("Runtime 初始化完成")
+
+    async def teardown(self) -> None:
+        """销毁 Runtime 资源。
+
+        调用方负责在退出前调用,失败不影响主流程。
+        """
+        await self._close_browser_bridge()
+
+    async def _init_browser_bridge(self) -> None:
+        """初始化浏览器桥单例并加载 settings。
+
+        不立即 connect — 连接在 init_bridge() / browser_status 中按需发生,
+        避免 Runtime 启动时被 WS 阻塞。
+        """
+        from pyagent.tools.browser import BrowserBridge, get_bridge, set_bridge
+        from pyagent.tools.browser.chrome_launcher import (
+            async_launch_chrome_if_needed,
+            wait_for_chrome_ready,
+        )
+
+        if get_bridge() is None:
+            set_bridge(BrowserBridge(self.settings.browser))
+        logger.debug("浏览器桥单例已就绪 (lazy connect)")
+
+        async def _background_start() -> None:
+            bridge = get_bridge()
+            if bridge is None:
+                return
+            try:
+                await bridge.connect()
+            except Exception as exc:
+                logger.debug(f"浏览器桥后台 start 失败: {exc}")
+
+            # 若开了 auto_launch_chrome 且 Chrome 没在跑,自动拉起
+            if bridge.settings.auto_launch_chrome and not bridge.has_clients():
+                try:
+                    result = await async_launch_chrome_if_needed(bridge.settings.chrome_path)
+                    if result == "started":
+                        logger.info("已自动启动 Chrome,等待扩展重连...")
+                        await wait_for_chrome_ready(timeout=5.0)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("自动启动 Chrome 失败 (非致命): %s", exc)
+
+        asyncio.create_task(_background_start())
+
+    async def _close_browser_bridge(self) -> None:
+        """关闭浏览器桥 (Runtime teardown 时调用)。"""
+        try:
+            from pyagent.tools.browser import close_bridge
+
+            await close_bridge()
+        except Exception as exc:
+            logger.warning(f"关闭浏览器桥失败: {exc}", )
 
     def _setup_logging(self) -> None:
         """配置日志级别和文件日志。"""
@@ -171,15 +229,15 @@ class Runtime:
         """注册所有内置 Hook：Logging / Permission / Usage / TurnCount / AutoSave /
         DuplicateGuard / Truncation。
 
-        所有 Hook 都在 ``setup()`` 一次性注册，运行期间不重复增册。
+        所有 Hook 都在 setup() 一次性注册，运行期间不重复增册。
         需要访问当前 session 的 Hook（UsageTracking / TurnCounting / AutoSave）
-        通过 ``self._current_session`` 延迟求值，每次事件触发时取最新实例。
+        通过 self._current_session 延迟求值，每次事件触发时取最新实例。
 
         跨 session 的状态清理（如 DuplicateGuard 计数 reset）由
-        ``Runtime.run`` 在每次开始时调用对应的 reset 闭包处理。
+        Runtime.run 在每次开始时调用对应的 reset 闭包处理。
 
-        受 ``Settings.hooks`` 控制:
-            - ``hooks.enabled = False`` → 全部跳过
+        受 Settings.hooks 控制:
+            - hooks.enabled = False → 全部跳过
             - 单独的 enable_* / blocked_tools 决定细节
         """
         hook_cfg = self.settings.hooks
@@ -270,6 +328,20 @@ class Runtime:
                     source="builtin",
                 )
                 discovery.load(item)
+
+        # 浏览器工具
+        if self.settings.browser.enabled:
+            browser_tools_dir = Path(__file__).parent.parent / "tools" / "browser" / "tools"
+            if browser_tools_dir.exists():
+                for py_file in browser_tools_dir.glob("*.py"):
+                    if py_file.name == "__init__.py" or py_file.stem.startswith("_"):
+                        continue
+                    item = DiscoveryItem(
+                        path=py_file,
+                        name=py_file.stem,
+                        source="browser",
+                    )
+                    discovery.load(item)
 
         # 用户工具
         user_tools_dir = get_user_tools_dir()
@@ -493,10 +565,6 @@ class Runtime:
             return []
 
         return self.session_store.list_sessions()
-
-    async def shutdown(self) -> None:
-        """关闭运行时，释放资源。"""
-        logger.info("Runtime 已关闭")
 
     @staticmethod
     def _make_event(event_type: str, **payload: Any) -> Event:

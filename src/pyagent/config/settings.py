@@ -14,6 +14,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from pyagent.tools.browser.settings import BrowserSettings
+
 
 class LLMSettings(BaseModel):
     """LLM 相关配置。"""
@@ -55,7 +57,7 @@ class SessionSettings(BaseModel):
 class LogSettings(BaseModel):
     """日志配置。"""
 
-    level: str = "INFO"
+    level: str = "DEBUG"
     file_enabled: bool = True
     dir: Path | None = None  # None 时用默认 ~/.pyagent/logs/
     filename: str = "pyagent.log"  # 日志文件名
@@ -65,8 +67,8 @@ class HooksSettings(BaseModel):
     """内置 Hook 配置。
 
     控制 Runtime 在 setup 时自动注册哪些横切关注点。
-    用户也可以通过禁用 ``enabled`` 完全跳过内置 hook，
-    然后在外部自行调用 ``setup_*_hooks`` 来定制。
+    用户也可以通过禁用 enabled 完全跳过内置 hook，
+    然后在外部自行调用 setup_*_hooks 来定制。
     """
 
     # 总开 False 时不注册任何内置 hook
@@ -111,6 +113,7 @@ class Settings(BaseSettings):
     session: SessionSettings = Field(default_factory=SessionSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     hooks: HooksSettings = Field(default_factory=HooksSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
 
     # 是否启用内置工具
     enable_builtin_tools: bool = True
