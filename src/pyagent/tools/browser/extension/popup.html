@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>PyAgent Browser Bridge</title>
+  <style>
+    body {
+      font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+      width: 260px;
+      padding: 12px 16px;
+      margin: 0;
+      font-size: 13px;
+      color: #1f2328;
+    }
+    h1 {
+      font-size: 14px;
+      margin: 0 0 8px 0;
+      font-weight: 600;
+    }
+    .status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .status.connected {
+      background: #dafbe1;
+      color: #1a7f37;
+    }
+    .status.disconnected {
+      background: #ffebe9;
+      color: #cf222e;
+    }
+    .info {
+      color: #57606a;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    code {
+      background: #f6f8fa;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <h1>PyAgent Browser Bridge</h1>
+  <div id="status" class="status disconnected">检测中...</div>
+  <div class="info">
+    <div>WS 地址: <code id="wsUrl">ws://127.0.0.1:18787</code></div>
+    <div style="margin-top:8px;">
+      打开 PyAgent 调用 <code>browser_status</code> 验证连接。
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

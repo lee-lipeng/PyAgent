@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "PyAgent Browser Bridge",
+  "version": "0.1.0",
+  "description": "本地 WS 桥,把当前页面 DOM 暴露给 PyAgent browser_* 工具。",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "PyAgent Browser Bridge",
+    "default_popup": "popup.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["vendor/html2canvas.min.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
