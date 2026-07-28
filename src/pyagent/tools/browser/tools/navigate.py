@@ -44,7 +44,8 @@ class BrowserNavigateArgs(BaseModel):
         "在浏览器中打开 URL 并等待页面就绪。\n"
         "默认新开 background tab (与旧页面隔离)。\n"
         "reuse_tab=true 时在当前 active tab 原地跳转(适合 SPA 内连续浏览)。\n"
-        "返回新页面的 title/url,如发生重定向返回最终 URL。"
+        "返回新页面的 title/url + 页面文本摘要(前 500 字符),无需额外调 scan 即可了解页面概况。\n"
+        "如发生重定向返回最终 URL。"
     ),
 )
 class BrowserNavigateTool(Tool):
@@ -94,11 +95,26 @@ class BrowserNavigateTool(Tool):
             return translate_exception(exc)
 
         data = result.data if isinstance(result.data, dict) else {}
+        summary = data.get("summary") or ""
+        text_chars = data.get("text_chars", 0)
+
+        # 构建富反馈:URL + title + 页面摘要(借鉴 GenericAgent 导航后自动返回概况)
+        content_parts = [
+            f"已导航到 {data.get('url', args['url'])}",
+            f"页面标题: {data.get('title', '(无标题)')}",
+        ]
+        if summary:
+            content_parts.append(f"页面摘要 ({text_chars} 字符): {summary}")
+        elif data.get("timeout"):
+            content_parts.append("(页面加载超时,摘要为空)")
+
         return ToolResult(
-            content=f"已导航到 {data.get('url', args['url'])}\n页面标题: {data.get('title', '(无标题)')}",
+            content="\n".join(content_parts),
             details={
                 "url": data.get("url"),
                 "title": data.get("title"),
+                "summary": summary,
+                "text_chars": text_chars,
                 "timeout_flag": data.get("timeout", False),
                 "new_tabs": result.new_tabs,
                 "reuse_tab": bool(args.get("reuse_tab", False)),

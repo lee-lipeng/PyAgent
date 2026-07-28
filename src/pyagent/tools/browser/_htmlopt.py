@@ -871,3 +871,51 @@ def wrap_iife(*js_blocks: str, expression: str) -> str:
     """
     body = "\n;\n".join(js_blocks)
     return f"(() => {{\n{body}\n; return ({expression});\n}})()"
+
+
+# ------------------------------------------------------------------
+# captureTransients —— 轻量级页面状态快照 (PyAgent 专属)
+# GenericAgent execute_js_rich 启发:自动采集 URL/title/scroll/焦点等
+# "transient" 状态,让 LLM 无需额外调用就能感知页面变化。
+# ------------------------------------------------------------------
+
+JS_CAPTURE_TRANSIENTS = r"""
+function captureTransients() {
+    return {
+        url: window.location.href,
+        title: document.title || '',
+        scrollX: window.scrollX || 0,
+        scrollY: window.scrollY || 0,
+        scrollHeight: document.documentElement.scrollHeight || 0,
+        readyState: document.readyState || '',
+        activeElement: (document.activeElement && document.activeElement.tagName)
+            ? (document.activeElement.tagName.toLowerCase()
+                + (document.activeElement.id ? '#' + document.activeElement.id : '')
+                + (document.activeElement.className
+                    ? '.' + String(document.activeElement.className).trim().split(/\s+/)[0]
+                    : ''))
+            : '',
+        selection: (window.getSelection && window.getSelection())
+            ? String(window.getSelection()).slice(0, 200)
+            : '',
+        timestamp: Date.now(),
+    };
+}
+"""
+
+# 轻量 DOM 快照 — 只取 body 的 textContent 长度 + 前 2000 字符,
+# 用于 auto 模式下检测"页面内容是否变化"。
+# 比 optHTML 轻得多(不 clone 不递归),适合每次 execute_js 都跑。
+JS_LIGHT_SNAPSHOT = r"""
+function lightSnapshot() {
+    const body = document.body;
+    if (!body) return { chars: 0, head: '' };
+    const text = (body.innerText || body.textContent || '').replace(/\s+/g, ' ').trim();
+    return {
+        chars: text.length,
+        head: text.slice(0, 2000),
+        url: window.location.href,
+        title: document.title || '',
+    };
+}
+"""

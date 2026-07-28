@@ -3,7 +3,9 @@
 可选 monitor 参数,GenericAgent 风格的"前后变化检测"
 
 monitor 取值:
-- "off": 默认,不监控。
+- "auto": 默认,轻量级富反馈 — 自动采集 URL/title/scroll 变化 + 页面文本 diff 摘要。
+  无需 LLM 额外调用就能感知页面变化(借鉴 GenericAgent execute_js_rich)。
+- "off": 不监控,只返回 JS 求值结果。
 - "dom": 执行前采集精简 HTML 快照,执行后再次采集,输出 find_changed_elements。
   适合 "我点击了某按钮,页面哪些地方变了?"
 - "network": 启动 window.__pyagent_api_mon,执行用户代码后返回捕获的 fetch / XHR 请求。
@@ -30,7 +32,9 @@ from pyagent.tools.browser._htmlopt import (
     JS_API_MONITOR_CLEAR,
     JS_API_MONITOR_QUERY,
     JS_API_MONITOR_START,
+    JS_CAPTURE_TRANSIENTS,
     JS_FIND_CHANGED_ELEMENTS,
+    JS_LIGHT_SNAPSHOT,
     JS_OPTHTML,
     JS_OPTIMIZE_FOR_TOKENS,
     wrap_iife,
@@ -47,9 +51,16 @@ class BrowserExecuteJsArgs(BaseModel):
         description="超时秒数 (默认 15, 范围 1-120)",
     )
     tab_id: str | None = Field(default=None, description="目标 tab id,空则用默认 tab")
-    monitor: Literal["off", "dom", "network", "full"] = Field(
-        default="off",
-        description="监控模式:off=不监控;dom=前后 DOM diff;network=捕获 fetch/XHR;full=dom+network。详见工具描述。",
+    monitor: Literal["auto", "off", "dom", "network", "full"] = Field(
+        default="auto",
+        description=(
+            "监控模式:"
+            "auto=默认,轻量富反馈(URL/title/scroll 变化 + 文本 diff 摘要);"
+            "off=不监控,只返回 JS 结果;"
+            "dom=前后 DOM diff(返回 changed_count + top_change);"
+            "network=捕获 fetch/XHR 请求;"
+            "full=dom+network 同时。"
+        ),
     )
 
 
@@ -59,10 +70,11 @@ class BrowserExecuteJsArgs(BaseModel):
         "在当前页面执行任意 JS 表达式并返回结果。"
         "可以用此工具读写 DOM、调用 fetch、操作 cookies 等一切浏览器内可做之事。"
         "返回值为 JSON 字符串,复杂对象会被自动序列化。\n"
-        "monitor 参数可开启前后变化检测:"
+        "默认 monitor=auto:自动采集 URL/title/scroll 变化 + 页面文本 diff 摘要,"
+        "无需额外调用就能感知页面变化(类似 GenericAgent execute_js_rich)。\n"
         "monitor=dom 时返回 changed_count + top_change (前后 HTML diff);"
         "monitor=network 时返回所有 fetch/XHR 请求 (含 method/url/status/body);"
-        "monitor=full 同时返回两者。"
+        "monitor=full 同时返回两者。\n"
         "常用模式: monitor=network + code='await new Promise(r=>setTimeout(r,2000))'"
         "用于采集滚动加载的 API 调用。"
     ),
@@ -89,7 +101,7 @@ class BrowserExecuteJsTool(Tool):
                 details={"error": "aborted"},
             )
 
-        monitor = args.get("monitor", "off")
+        monitor = args.get("monitor", "auto")
         code = args["code"]
 
         # 装配最终 JS: 监控分两阶段 (baseline + run + after)
@@ -99,6 +111,9 @@ class BrowserExecuteJsTool(Tool):
 
         if monitor == "off":
             return await _run_user_code(bridge, code, args)
+
+        if monitor == "auto":
+            return await _run_with_auto_feedback(bridge, code, args)
 
         if monitor == "network":
             return await _run_with_network_monitor(bridge, code, args)
@@ -130,6 +145,134 @@ async def _run_user_code(bridge, code: str, args: dict) -> ToolResult:
             "tab_id": args.get("tab_id") or bridge.default_tab_id,
             "new_tabs": result.new_tabs,
             "monitor": "off",
+        },
+    )
+
+
+async def _run_with_auto_feedback(bridge, code: str, args: dict) -> ToolResult:
+    """auto 模式:轻量级富反馈(借鉴 GenericAgent execute_js_rich)。
+
+    在用户代码前后各采集一次 transients + lightSnapshot,
+    自动报告:
+    - URL/title 变化(检测 SPA 跳转)
+    - scroll 变化(检测滚动加载)
+    - 页面文本 diff 摘要(检测内容变化)
+    - newTabs(检测新开 tab)
+
+    全部在一次 execute_js 调用内完成,不增加 WS 往返。
+    """
+    combined = wrap_iife(
+        JS_CAPTURE_TRANSIENTS,
+        JS_LIGHT_SNAPSHOT,
+        expression=f"""
+            (async () => {{
+                const __before_t = captureTransients();
+                const __before_s = lightSnapshot();
+                let __user_result = undefined;
+                let __user_error = null;
+                try {{
+                    __user_result = await (async () => {{ {code} }})();
+                }} catch (e) {{
+                    __user_error = String(e && e.message || e);
+                }}
+                const __after_t = captureTransients();
+                const __after_s = lightSnapshot();
+                return {{
+                    user_result: __user_result,
+                    user_error: __user_error,
+                    before: __before_t,
+                    after: __after_t,
+                    before_snapshot: __before_s,
+                    after_snapshot: __after_s,
+                }};
+            }})()
+        """,
+    )
+    try:
+        result = await bridge.execute_js(
+            code=combined,
+            tab_id=args.get("tab_id"),
+            timeout=args["timeout"],
+        )
+    except Exception as exc:
+        return _translate(exc)
+
+    data = result.data if isinstance(result.data, dict) else {}
+    user_result = data.get("user_result")
+    user_error = data.get("user_error")
+    before_t = data.get("before") or {}
+    after_t = data.get("after") or {}
+    before_s = data.get("before_snapshot") or {}
+    after_s = data.get("after_snapshot") or {}
+
+    # 构建 content
+    sections: list[str] = []
+
+    # 1. 用户代码返回值
+    if user_error is not None:
+        sections.append(f"⚠️ 用户代码抛错: {user_error}")
+    elif user_result is not None:
+        sections.append("--- JS 返回值 ---")
+        sections.append(_format_value(user_result))
+
+    # 2. URL/title 变化
+    url_changed = before_t.get("url") != after_t.get("url")
+    title_changed = before_t.get("title") != after_t.get("title")
+    if url_changed or title_changed:
+        sections.append("--- 页面导航变化 ---")
+        if url_changed:
+            sections.append(f"  URL: {before_t.get('url', '?')[:120]} → {after_t.get('url', '?')[:120]}")
+        if title_changed:
+            sections.append(f"  title: {before_t.get('title', '?')[:80]} → {after_t.get('title', '?')[:80]}")
+
+    # 3. scroll 变化
+    scroll_delta = after_t.get("scrollY", 0) - before_t.get("scrollY", 0)
+    if abs(scroll_delta) > 50:
+        sections.append(
+            f"--- 滚动变化: Y {before_t.get('scrollY', 0)} → {after_t.get('scrollY', 0)} (Δ{scroll_delta:+d}) ---"
+        )
+
+    # 4. 文本 diff 摘要
+    before_chars = before_s.get("chars", 0)
+    after_chars = after_s.get("chars", 0)
+    char_delta = after_chars - before_chars
+    if abs(char_delta) > 100 or url_changed:
+        sections.append(f"--- 页面文本变化: {before_chars} → {after_chars} 字符 (Δ{char_delta:+d}) ---")
+        # 如果文本变了,展示 after 的前 500 字符作为摘要
+        if abs(char_delta) > 100 and not url_changed:
+            after_head = (after_s.get("head") or "")[:500]
+            if after_head:
+                sections.append(f"  当前页面文本摘要: {after_head}")
+
+    # 5. activeElement 变化
+    before_active = before_t.get("activeElement", "")
+    after_active = after_t.get("activeElement", "")
+    if before_active != after_active and after_active:
+        sections.append(f"  焦点元素: {before_active or '(无)'} → {after_active}")
+
+    # 6. newTabs
+    if result.new_tabs:
+        sections.append(f"--- 新开 tab: {len(result.new_tabs)} 个 ---")
+        for nt in result.new_tabs[:5]:
+            sections.append(f"  {nt.get('url', '?')[:120]}")
+
+    # 如果没有任何变化,给一个简洁的"无变化"提示
+    if not sections:
+        sections.append("(页面无变化)")
+
+    content = "\n".join(sections)
+    return ToolResult(
+        content=content,
+        details={
+            "code_length": len(code),
+            "tab_id": args.get("tab_id") or bridge.default_tab_id,
+            "new_tabs": result.new_tabs,
+            "monitor": "auto",
+            "url_changed": url_changed,
+            "title_changed": title_changed,
+            "scroll_delta": scroll_delta,
+            "text_delta": char_delta,
+            "user_error": user_error,
         },
     )
 

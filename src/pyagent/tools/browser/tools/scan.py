@@ -45,7 +45,10 @@ class BrowserScanArgs(BaseModel):
     mode: Literal["text", "html", "snapshot", "lists"] = Field(
         default="text",
         description=(
-            "返回格式:text=纯文本 / html=简化 HTML / snapshot=结构化 DOM / "
+            "返回格式:"
+            "text=纯文本(适合阅读,默认);"
+            "html=简化 HTML(保留标签结构,去 script/style);"
+            "snapshot=结构化 DOM 数组(元素 + 子元素 + 文本);"
             "lists=页面里'看着像列表'的容器候选(不返回内容,只返回 selector)"
         ),
     )
@@ -53,8 +56,9 @@ class BrowserScanArgs(BaseModel):
         default="full",
         description=(
             "页面精简度 (text/html 模式生效):"
-            "none=不动 DOM 直接 raw 模式;light=删 script/style/comment 标签;"
-            "full=GenericAgent optHTML 处理(去 iframe/overlay/链式压缩,token 节省 60%+)。"
+            "none=不动 DOM 直接 raw 模式;"
+            "light=删 script/style/comment 标签;"
+            "full=GenericAgent optHTML 处理(去 iframe/overlay/链式压缩,token 节省 60%+,默认)。"
             "snapshot 模式固定 light(仅删 script/style,保留结构)。"
         ),
     )
@@ -92,14 +96,14 @@ class BrowserScanArgs(BaseModel):
     "browser_scan",
     description=(
         "获取当前活跃 tab 页面快照。\n"
-        "mode=text: 返回 innerText (适合阅读);\n"
-        "mode=html: 返回简化 HTML (保留标签结构,去 script/style);\n"
-        "mode=snapshot: 返回结构化 DOM 数组 (元素 + 子元素 + 文本);\n"
-        "mode=lists: 只返回 findMainList 候选 (selector + score + firstItemPreview),不返回内容。\n"
-        "simplify=none|light|full 控制精简度 (full=GenericAgent optHTML)。\n"
-        "find_lists=true 时在 text/html/snapshot 同时返回列表候选。\n"
-        "cutlist=true + instruction=关键词 时启用列表压缩(节省 token)。\n"
-        "可指定 CSS selector 限定范围。"
+        "推荐用法:\n"
+        "  首次了解页面: mode=text (默认,返回精简纯文本)\n"
+        "  精准提取列表: mode=lists → 拿 selector → mode=html + selector=...\n"
+        "  看页面结构: mode=html (简化 HTML,保留标签)\n"
+        "  精细 DOM 分析: mode=snapshot (结构化 DOM 数组)\n"
+        "simplify=full (默认) 使用 GenericAgent optHTML 精简,token 节省 60%+。\n"
+        "cutlist=true + instruction=关键词 启用列表压缩(大量节省 token)。\n"
+        "可指定 CSS selector 限定扫描范围。"
     ),
 )
 class BrowserScanTool(Tool):

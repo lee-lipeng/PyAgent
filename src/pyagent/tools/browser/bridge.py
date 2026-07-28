@@ -406,30 +406,45 @@ class BrowserBridge:
                 const event = {json.dumps(wait)};
                 const handler = () => {{
                     window.removeEventListener(event, handler);
+                    // 采集页面摘要(借鉴 GenericAgent 导航后自动返回概况)
+                    const body = document.body;
+                    const text = body ? (body.innerText || body.textContent || '').replace(/\\s+/g, ' ').trim() : '';
                     resolve({{
                         url: window.location.href,
                         title: document.title,
                         target: target,
+                        summary: text.slice(0, 500),
+                        text_chars: text.length,
                     }});
                 }};
                 if (document.readyState === 'complete' && event === 'load') {{
                     // 已经在目标页 (可能同步 SPA 跳转)
+                    const body = document.body;
+                    const text = body ? (body.innerText || body.textContent || '').replace(/\\s+/g, ' ').trim() : '';
                     resolve({{
                         url: window.location.href,
                         title: document.title,
                         target: target,
+                        summary: text.slice(0, 500),
+                        text_chars: text.length,
                     }});
                     return;
                 }}
                 // Fast path: 即使 event 是 'load',SPA/搜索结果常不发 load,
                 // 只要 DOM 已 interactive 就返回(URL 已 match 时尤其有意义)
                 if (document.readyState === 'interactive' || document.readyState === 'complete') {{
-                    setTimeout(() => resolve({{
-                        url: window.location.href,
-                        title: document.title,
-                        target: target,
-                        fastpath: true,
-                    }}), 300);
+                    setTimeout(() => {{
+                        const body = document.body;
+                        const text = body ? (body.innerText || body.textContent || '').replace(/\\s+/g, ' ').trim() : '';
+                        resolve({{
+                            url: window.location.href,
+                            title: document.title,
+                            target: target,
+                            fastpath: true,
+                            summary: text.slice(0, 500),
+                            text_chars: text.length,
+                        }});
+                    }}, 300);
                     return;
                 }}
                 window.addEventListener(event, handler, {{ once: true }});
@@ -438,6 +453,8 @@ class BrowserBridge:
                     title: document.title,
                     target: target,
                     timeout: true,
+                    summary: '',
+                    text_chars: 0,
                 }}), 8000);
             }});
         }})()
@@ -642,9 +659,13 @@ class BrowserBridge:
         """
         mtype = msg.get("type")
         if mtype == "ping":
-            # 只有 popup-only 客户端会主动发 ping 然后 close;
-            # background 心跳也在 open 30s 后才发,这里统一标记 popup。
-            if ws is not None:
+            # popup-only 客户端连进来只发 ping 然后 close,不会发 ready/ack/result。
+            # background.js 的心跳也发 ping (每 30s),但 bg 在发 ping 之前已经发过
+            # ready/tabs_update 被标记为 "bg" 了。
+            # 所以:只有初始 unknown 角色的客户端收到 ping 才标记为 popup;
+            # 已确认为 bg 的客户端不因 ping 降级(否则 30s 后 bg 被误降级 →
+            # has_clients() 返回 False → navigate/execute_js 报"未连接")。
+            if ws is not None and getattr(ws, "_pyagent_role", "unknown") == "unknown":
                 ws._pyagent_role = "popup"
         elif mtype == "ack":
             exec_id = msg.get("id")

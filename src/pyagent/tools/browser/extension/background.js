@@ -95,20 +95,40 @@ async function handleNavigate(execId, url, code, reuseTab) {
     await chrome.tabs.update(tabId, { url });
     // wait load/DOMContentLoaded
     await waitForTabComplete(tabId, 15_000);
-    await runCodeOnTab(String(tabId), code);
+    // 注入导航 JS(含页面摘要采集)
+    const navResult = await runCodeOnTab(String(tabId), code);
     sendProgress(execId, 'page_ready', `复用 tab 已就绪,提取 title/url`);
     const after = await chrome.tabs.get(tabId);
     sendProgress(execId, 'navigated', `导航完成 → ${after.title || '(无标题)'}`);
-    return { url: after.url, title: after.title, target: String(after.id), created: false, reused: true };
+    // 合并 JS 返回的摘要 + Chrome tab API 的 url/title
+    return {
+      url: after.url,
+      title: after.title,
+      target: String(after.id),
+      created: false,
+      reused: true,
+      summary: (navResult && navResult.summary) || '',
+      text_chars: (navResult && navResult.text_chars) || 0,
+    };
   }
   // 默认 new tab
   const created = await chrome.tabs.create({ url, active: false });
   sendProgress(execId, 'tab_created', `已创建新 tab #${created.id} (url=${url})`);
-  await runCodeOnTab(created.id, code);
+  // 注入导航 JS(含页面摘要采集) — 新 tab 需要先等 DOM ready
+  await waitForTabComplete(created.id, 15_000);
+  const navResult = await runCodeOnTab(created.id, code);
   sendProgress(execId, 'page_ready', `页面脚本已返回,提取 title/url`);
   const after = await chrome.tabs.get(created.id);
   sendProgress(execId, 'navigated', `导航完成 → ${after.title || '(无标题)'}`);
-  return { url: after.url, title: after.title, target: String(after.id), created: true, reused: false };
+  return {
+    url: after.url,
+    title: after.title,
+    target: String(after.id),
+    created: true,
+    reused: false,
+    summary: (navResult && navResult.summary) || '',
+    text_chars: (navResult && navResult.text_chars) || 0,
+  };
 }
 
 // 轮询等 tab status === 'complete' 或超时
