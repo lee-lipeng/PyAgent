@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import socket
 import time
 import uuid
@@ -297,6 +298,20 @@ class BrowserBridge:
         try:
             with contextlib.suppress(Exception):
                 peer = f"{ws.remote_address[0]}:{ws.remote_address[1]}"
+
+            # 拒绝普通网页发起的跨站 WS 连接；Chrome 扩展 Origin 是固定格式。
+            # 无 Origin 的原生本地客户端仍保持兼容，此检查不等同于身份认证。
+            request = getattr(ws, "request", None)
+            headers = getattr(request, "headers", None) or getattr(
+                ws, "request_headers", None
+            )
+            origin = headers.get("Origin") if headers else None
+            if origin is not None and not re.fullmatch(
+                r"chrome-extension://[a-p]{32}", origin
+            ):
+                logger.warning("拒绝非 Chrome 扩展的 WebSocket Origin: %s", origin)
+                await ws.close(code=1008, reason="Untrusted WebSocket Origin")
+                return
 
             # 客户端角色:unknown(初始)→ bg(发过 ready/tabs_update/ack/result)→
             # popup(只发过 ping 然后 close,不算可用客户端)
