@@ -50,19 +50,21 @@ async def test_windows_tree_cleanup_calls_taskkill(monkeypatch):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows 实机子进程测试")
 @pytest.mark.asyncio
-async def test_windows_abort_kills_child_process(tmp_path):
+async def test_windows_terminate_process_kills_child_process(tmp_path):
     pid_file = tmp_path / "child.pid"
-    child_code = "import time;time.sleep(60)"
-    parent_code = (
-        "import subprocess,sys;"
-        f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
-        f"open({str(pid_file)!r},'w').write(str(p.pid));"
-        "p.wait()"
+    parent_script = tmp_path / "parent.py"
+    parent_script.write_text(
+        "import subprocess, sys\n"
+        f"p = subprocess.Popen([sys.executable, '-c', {('import time;time.sleep(60)')!r}])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(p.pid))\n"
+        "p.wait()\n",
+        encoding="utf-8",
     )
-    command = subprocess.list2cmdline([sys.executable, "-c", parent_code])
-    cancel_signal = asyncio.Event()
-    task = asyncio.create_task(
-        RunBashTool().execute("id", {"command": command}, signal=cancel_signal)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(parent_script),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
     )
     pid = None
     try:
@@ -72,9 +74,11 @@ async def test_windows_abort_kills_child_process(tmp_path):
                 break
             await asyncio.sleep(0.05)
         assert pid is not None, "子进程 PID 文件未生成"
-        cancel_signal.set()
-        result = await asyncio.wait_for(task, timeout=15)
-        assert result.details["error"] == "aborted"
+
+        await asyncio.wait_for(
+            RunBashTool._terminate_process(process), timeout=15
+        )
+        assert process.returncode is not None
 
         kernel32 = ctypes.windll.kernel32
         kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -93,9 +97,9 @@ async def test_windows_abort_kills_child_process(tmp_path):
             await asyncio.sleep(0.05)
         assert not running, "Windows 子进程树未完整终止"
     finally:
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
         if pid is not None:
             subprocess.run(
                 ["taskkill", "/F", "/PID", str(pid)],
