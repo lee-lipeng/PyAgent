@@ -32,6 +32,7 @@ jobs:
           src/pyagent/core/loop.py
           src/pyagent/core/runtime.py
           src/pyagent/core/compaction.py
+          src/pyagent/hooks/builtin.py
           src/pyagent/session/store.py
           src/pyagent/tools/schema.py
           src/pyagent/tools/executor.py
