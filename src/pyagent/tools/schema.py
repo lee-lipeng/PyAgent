@@ -14,14 +14,13 @@ from pydantic import BaseModel
 def model_to_openai_schema(model: type[BaseModel]) -> dict[str, Any]:
     """把 pydantic 模型转为 OpenAI function calling 的 parameters 格式。
 
-    pydantic 的 model_json_schema() 会包含 $defs、title 等额外字段，
-    这里做清理，只保留 type / properties / required。
+    保留被 $ref 引用的 $defs / definitions，避免嵌套参数模型生成无效 Schema。
+    只移除展示性的 title 字段。
     """
     schema = model.model_json_schema()
 
-    # 移除 pydantic 特有的字段
-    for key in ("title", "$defs", "definitions"):
-        schema.pop(key, None)
+    # 不可移除 $defs / definitions：properties 中的 $ref 需要这些定义。
+    schema.pop("title", None)
 
     # 清理 properties 中的 title
     properties = schema.get("properties", {})

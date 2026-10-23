@@ -25,6 +25,8 @@ from pyagent.core.context import RuntimeContext
 from pyagent.core.context_builder import ContextBuilder
 from pyagent.hooks.types import EventType
 from pyagent.llm.token_estimator import ContextUsage
+from pyagent.llm.types import ToolCall
+from pyagent.tools.base import ToolResult
 from pyagent.session import Session
 from pyagent.session.messages import AssistantMessage, ToolResultMessage, UserMessage
 from pyagent.utils.logger import get_logger
@@ -199,6 +201,11 @@ class AgentLoop:
                             on_chunk(chunk.delta)
 
                     response = agg.result()
+                    if ctx.is_cancelled():
+                        await self.agent.dispatch(EventType.AGENT_ABORT, turns=turns)
+                        return LoopResult(
+                            success=False, turns=turns, stop_reason="cancelled"
+                        )
                 except Exception as exc:
                     logger.exception("LLM 调用失败")
                     await self.agent.dispatch(
@@ -300,20 +307,76 @@ class AgentLoop:
                         )
                     tool_calls = batch_pre.value
 
+                    # Hook 可以修改工具名/参数，但数量、顺序和调用 ID 必须保持不变。
+                    expected_ids = [tc["id"] for tc in assistant_msg["tool_calls"]]
+                    if (
+                        not isinstance(tool_calls, list)
+                        or len(tool_calls) != len(expected_ids)
+                        or any(not isinstance(tc, ToolCall) for tc in tool_calls)
+                        or [tc.id for tc in tool_calls] != expected_ids
+                    ):
+                        for item in assistant_msg["tool_calls"]:
+                            session.add_message(
+                                ToolResultMessage(
+                                    content="Hook 返回的工具批次与原始调用 ID 不一致",
+                                    tool_call_id=item["id"],
+                                    name=item["function"]["name"],
+                                )
+                            )
+                        return LoopResult(
+                            success=False,
+                            turns=turns,
+                            stop_reason="invalid_tool_batch",
+                            error="Hook 不允许增加、删除或修改工具调用 ID",
+                        )
+
+                    # 持久化 Hook 合法改写后的工具调用，确保请求与结果一致。
+                    session.messages[-1] = AssistantMessage(
+                        content=response.content,
+                        tool_calls=[
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    )
+
                     results = await self.agent.tool_executor.execute_batch(
                         tool_calls,
                         signal=ctx.cancel_signal,
                     )
-                    results = (
-                        await self.agent.dispatch(
-                            EventType.TOOL_BATCH_END,
-                            initial=results,
-                            turn=turns,
-                            count=len(results),
-                            failed_count=sum(r.is_error for r in results),
-                        )
-                    ).value
+                    batch_end = await self.agent.dispatch(
+                        EventType.TOOL_BATCH_END,
+                        initial=results,
+                        turn=turns,
+                        count=len(results),
+                        failed_count=sum(r.is_error for r in results),
+                    )
+                    if batch_end.cancelled:
+                        # 工具已经执行，保留原始结果，不丢失审计记录。
+                        logger.warning("TOOL_BATCH_END 取消结果改写：%s", batch_end.cancel_reason)
+                    elif (
+                        isinstance(batch_end.value, list)
+                        and len(batch_end.value) == len(tool_calls)
+                        and all(isinstance(item, ToolResult) for item in batch_end.value)
+                    ):
+                        results = batch_end.value
+                    else:
+                        logger.warning("TOOL_BATCH_END 返回无效结果，保留原始结果")
                 except PermissionError as exc:
+                    for item in assistant_msg["tool_calls"]:
+                        session.add_message(
+                            ToolResultMessage(
+                                content=f"工具执行权限被拒绝: {exc}",
+                                tool_call_id=item["id"],
+                                name=item["function"]["name"],
+                            )
+                        )
                     return LoopResult(
                         success=False,
                         turns=turns,
@@ -343,7 +406,7 @@ class AgentLoop:
 
                     logger.info(f"注入{len(steered)}条改向消息")
 
-                if all(r.terminate for r in results):
+                if results and all(r.terminate for r in results):
                     final_response = next((r.content for r in results if r.content), "")
                     return LoopResult(
                         success=True,
