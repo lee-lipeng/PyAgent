@@ -88,3 +88,24 @@ async def test_invalid_batch_results_fallback_to_executor():
     result = await AgentLoop(FakeAgent("invalid-results")).run("开始", session)
     assert result.success
     assert session.messages[2].content == "读取完成"
+
+
+class ArgumentRewritingExecutor:
+    async def execute_batch(self, calls, signal=None):
+        # 模拟 BEFORE_TOOL Hook 执行期间原地改写 ToolCall 参数。
+        calls[0].arguments = {"path": "effective.txt"}
+        return [ToolResult(content="已处理")]
+
+
+@pytest.mark.asyncio
+async def test_before_tool_argument_rewrite_persisted_after_execution():
+    session = Session.create_new("audited")
+    agent = FakeAgent("normal")
+    agent.tool_executor = ArgumentRewritingExecutor()
+
+    result = await AgentLoop(agent).run("开始", session)
+
+    assert result.success
+    arguments = session.messages[1].tool_calls[0]["function"]["arguments"]
+    assert '"path": "effective.txt"' in arguments
+    assert session.messages[2].tool_call_id == "id-1"

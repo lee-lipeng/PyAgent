@@ -332,7 +332,11 @@ class AgentLoop:
                             error="Hook 不允许增加、删除或修改工具调用 ID",
                         )
 
-                    # 持久化 Hook 合法改写后的工具调用，确保请求与结果一致。
+                    results = await self.agent.tool_executor.execute_batch(
+                        tool_calls,
+                        signal=ctx.cancel_signal,
+                    )
+                    # BEFORE_TOOL Hook 可能继续改写实际参数，必须记录最终执行参数。
                     session.messages[-1] = AssistantMessage(
                         content=response.content,
                         tool_calls=[
@@ -348,10 +352,6 @@ class AgentLoop:
                         ],
                     )
 
-                    results = await self.agent.tool_executor.execute_batch(
-                        tool_calls,
-                        signal=ctx.cancel_signal,
-                    )
                     batch_end = await self.agent.dispatch(
                         EventType.TOOL_BATCH_END,
                         initial=results,
