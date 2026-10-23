@@ -53,7 +53,11 @@ def setup_logging_hooks(hooks: HookManager, logger: logging.Logger) -> None:
         logger.debug("Agent 结束")
 
     async def on_before_tool(event: Event) -> None:
-        logger.debug(f"调用工具: {event.payload.get('tool_name')} 参数: {event.payload.get('args')}")
+        logger.debug(
+            "调用工具: %s 参数: %s",
+            event.payload.get("tool_name"),
+            event.payload.get("args"),
+        )
 
     async def on_after_tool(event: Event) -> None:
         is_error = event.payload.get("is_error", False)
@@ -239,7 +243,9 @@ def setup_tool_result_truncation_hook(
         head = result.content[:half]
         tail = result.content[-half:]
         truncated = (
-            f"{head}\n\n... [内容已截断，共 {len(result.content)} 字符，仅保留前 {half} 与后 {half} 字符] ...\n\n{tail}"
+            f"{head}\n\n"
+            f"... [内容已截断，共 {len(result.content)} 字符，"
+            f"仅保留前 {half} 与后 {half} 字符] ...\n\n{tail}"
         )
         # 构造新的 ToolResult 替换原对象，保持 details 透传
         return ToolResult(
