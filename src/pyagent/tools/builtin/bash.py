@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal as signal_module
 from collections.abc import Callable
@@ -37,10 +38,8 @@ class RunBashTool(Tool):
     async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
         """终止命令及其子进程（POSIX），并回收主进程。"""
         if os.name != "nt":
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal_module.SIGKILL)
-            except ProcessLookupError:
-                pass
         elif proc.returncode is None:
             proc.kill()
         if proc.returncode is None:
