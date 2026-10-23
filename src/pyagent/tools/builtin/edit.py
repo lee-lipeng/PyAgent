@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from pyagent.tools.base import Tool, ToolResult
-from pyagent.tools.builtin.write import _resolve_path
+from pyagent.tools.builtin.write import _atomic_write_text, _resolve_path
 from pyagent.tools.decorators import tool
 
 
@@ -105,7 +105,7 @@ class EditFileTool(Tool):
         new_content = content.replace(old_string, new_string, 1)
 
         try:
-            path.write_text(new_content, encoding="utf-8")
+            _atomic_write_text(path, new_content)
         except Exception as exc:
             return ToolResult(
                 content=f"写入文件失败: {exc}",

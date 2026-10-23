@@ -39,6 +39,11 @@ jobs:
           src/pyagent/tools/executor.py
           src/pyagent/tools/discovery.py
           src/pyagent/utils/loader.py
+          src/pyagent/config/settings.py
+          src/pyagent/config/loader.py
+          src/pyagent/cli/app.py
+          src/pyagent/tools/builtin/write.py
+          src/pyagent/tools/builtin/edit.py
           src/pyagent/tools/builtin/bash.py
           src/pyagent/llm/client.py
           src/pyagent/llm/streaming.py
