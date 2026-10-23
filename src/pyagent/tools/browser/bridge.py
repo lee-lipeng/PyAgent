@@ -564,6 +564,8 @@ class BrowserBridge:
         try:
             while exec_id not in self._results:
                 await asyncio.sleep(0.05)
+                if self._closed:
+                    raise BrowserNotConnectedError("浏览器桥已断开，当前请求终止")
                 if not acked and exec_id in self._acks:
                     acked = True
                     # ACK 后重新计时 (浏览器开始执行 JS)

@@ -99,3 +99,21 @@ async def test_browser_ack_without_result_raises_timeout_and_cleans_state():
         await bridge._execute_ws("request", "42", "tab", timeout=0.04)
     assert not bridge._active_exec_ids
     assert not bridge._acks
+
+
+@pytest.mark.asyncio
+async def test_disconnect_interrupts_inflight_browser_request():
+    bridge = BrowserBridge()
+    bridge._ws_clients.add(FakeSocket())
+    pending = asyncio.create_task(
+        bridge._execute_ws("pending", "42", "tab", timeout=60)
+    )
+    await asyncio.sleep(0.02)
+    await bridge.disconnect()
+
+    from pyagent.tools.browser.exceptions import BrowserNotConnectedError
+
+    with pytest.raises(BrowserNotConnectedError, match="断开"):
+        await asyncio.wait_for(pending, timeout=0.5)
+    assert not bridge._active_exec_ids
+    assert not bridge._results
