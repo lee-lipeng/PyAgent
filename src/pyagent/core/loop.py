@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -196,9 +198,38 @@ class AgentLoop:
                         messages=messages,
                         tools=tools if tools else None,
                     )
-                    async for chunk in chunks:
-                        if chunk.delta and on_chunk:
-                            on_chunk(chunk.delta)
+                    # 并行监听用户 Abort；不能依赖服务端继续推送下一个 chunk。
+                    async def consume_stream() -> None:
+                        async for chunk in chunks:
+                            if chunk.delta and on_chunk:
+                                on_chunk(chunk.delta)
+
+                    stream_task = asyncio.create_task(consume_stream())
+                    abort_task = asyncio.create_task(ctx.cancel_signal.wait())
+                    try:
+                        done, _ = await asyncio.wait(
+                            {stream_task, abort_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if abort_task in done and ctx.is_cancelled():
+                            stream_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await stream_task
+                            await self.agent.dispatch(EventType.AGENT_ABORT, turns=turns)
+                            return LoopResult(
+                                success=False,
+                                turns=turns,
+                                stop_reason="cancelled",
+                            )
+                        await stream_task
+                    finally:
+                        abort_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await abort_task
+                        if not stream_task.done():
+                            stream_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await stream_task
 
                     response = agg.result()
                     if ctx.is_cancelled():
