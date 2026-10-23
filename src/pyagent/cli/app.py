@@ -43,8 +43,8 @@ console = Console()
 renderer = Renderer(console)
 
 
-def _quiet_setup() -> Runtime:
-    """加载配置并初始化 Runtime，静音 setup 阶段的 INFO 日志。
+async def _quiet_setup() -> Runtime:
+    """在当前事件循环中初始化 Runtime，静音 setup 阶段 INFO 日志。
 
     子命令（chat/tools/skills/sessions）只关心结果，不需要看加载细节。
     使用 logging.disable 抑制所有 logger 的 INFO（比 setLevel 更稳，
@@ -54,7 +54,7 @@ def _quiet_setup() -> Runtime:
     try:
         settings = load_settings()
         runtime = Runtime(settings)
-        asyncio.run(runtime.setup())
+        await runtime.setup()
     finally:
         logging.disable(logging.NOTSET)
     return runtime
@@ -63,13 +63,17 @@ def _quiet_setup() -> Runtime:
 @app.command()
 def chat() -> None:
     """启动交互式 REPL 对话。"""
-    runtime = _quiet_setup()
+    async def _chat() -> None:
+        runtime = await _quiet_setup()
+        try:
+            from pyagent.cli.repl import REPL
 
-    from pyagent.cli.repl import REPL
+            await REPL(runtime, console).start()
+        finally:
+            await runtime.teardown()
 
-    repl = REPL(runtime, console)
     try:
-        asyncio.run(repl.start())
+        asyncio.run(_chat())
     except KeyboardInterrupt:
         console.print("\n  [dim]已退出[/]")
 
@@ -80,9 +84,14 @@ def run(
     show_tools: bool = typer.Option(False, "--show-tools", "-t", help="显示工具调用过程"),
 ) -> None:
     """单次执行查询。"""
-    runtime = _quiet_setup()
+    async def _execute():
+        runtime = await _quiet_setup()
+        try:
+            return await runtime.run(query)
+        finally:
+            await runtime.teardown()
 
-    result = asyncio.run(runtime.run(query))
+    result = asyncio.run(_execute())
 
     if result.final_response:
         renderer.assistant_response(result.final_response)
@@ -98,9 +107,14 @@ def run(
 @app.command()
 def tools() -> None:
     """列出已加载的工具。"""
-    runtime = _quiet_setup()
+    async def _collect():
+        runtime = await _quiet_setup()
+        try:
+            return runtime.tool_registry.all()
+        finally:
+            await runtime.teardown()
 
-    all_tools = runtime.tool_registry.all()
+    all_tools = asyncio.run(_collect())
     if not all_tools:
         renderer.info("暂无已加载的工具。")
         return
@@ -119,9 +133,14 @@ def tools() -> None:
 @app.command()
 def skills() -> None:
     """列出已加载的技能。"""
-    runtime = _quiet_setup()
+    async def _collect():
+        runtime = await _quiet_setup()
+        try:
+            return runtime.skill_manager.all()
+        finally:
+            await runtime.teardown()
 
-    all_skills = runtime.skill_manager.all()
+    all_skills = asyncio.run(_collect())
     if not all_skills:
         renderer.info("暂无已加载的技能。")
         return
@@ -141,9 +160,14 @@ def skills() -> None:
 @app.command()
 def sessions() -> None:
     """列出保存的会话。"""
-    runtime = _quiet_setup()
+    async def _collect():
+        runtime = await _quiet_setup()
+        try:
+            return runtime.list_sessions()
+        finally:
+            await runtime.teardown()
 
-    all_sessions = runtime.list_sessions()
+    all_sessions = asyncio.run(_collect())
     if not all_sessions:
         renderer.info("暂无保存的会话。")
         return

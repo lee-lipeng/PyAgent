@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import os
+import re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -36,6 +39,12 @@ class SessionStore:
         """生成新的会话 ID。"""
         return uuid.uuid4().hex[:12]
 
+    def _session_path(self, session_id: str) -> Path:
+        """约束会话 ID 为安全文件名，防止越界读取或删除文件。"""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise ValueError("无效会话 ID：仅允许字母、数字、下划线及连字符")
+        return self._dir / f"{session_id}.json"
+
     def save(self, session: Session) -> Path | None:
         """保存会话到文件。
 
@@ -48,14 +57,25 @@ class SessionStore:
             logger.debug("ephemeral 会话跳过保存: %s", session.metadata.id)
             return None
 
-        path = self._dir / f"{session.metadata.id}.json"
-        session.to_file(path)
+        path = self._session_path(session.metadata.id)
+        # 临时文件与目标文件处于同一目录，写入成功后原子替换旧会话。
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{session.metadata.id}.", suffix=".tmp", dir=self._dir
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            session.to_file(temp_path)
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
         logger.debug("保存会话: %s", path)
         return path
 
     def load(self, session_id: str) -> Session | None:
         """加载会话，不存在返回 None。"""
-        path = self._dir / f"{session_id}.json"
+        path = self._session_path(session_id)
         if not path.exists():
             return None
         try:
@@ -66,7 +86,7 @@ class SessionStore:
 
     def delete(self, session_id: str) -> bool:
         """删除会话文件。"""
-        path = self._dir / f"{session_id}.json"
+        path = self._session_path(session_id)
         if path.exists():
             path.unlink()
             logger.debug("删除会话: %s", path)
@@ -88,7 +108,7 @@ class SessionStore:
 
     def exists(self, session_id: str) -> bool:
         """检查会话是否存在。"""
-        return (self._dir / f"{session_id}.json").exists()
+        return self._session_path(session_id).exists()
 
     def create(
         self,
@@ -116,6 +136,7 @@ class SessionStore:
             新创建的 Session 对象。
         """
         sid = session_id or self.generate_id()
+        self._session_path(sid)
         session = Session.create_new(
             session_id=sid,
             model=model,

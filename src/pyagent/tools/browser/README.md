@@ -110,8 +110,11 @@
 
 #### `browser_screenshot` 真实实现
 
-通过 `content.js` 注入 `html2canvas`(优先本地 `vendor/html2canvas.min.js`,否则 CDN 兜底),
-将当前页面 DOM 渲染为 PNG/JPEG,直接返回 base64 dataURL。
+截图请求到达时，`background.js` 通过 `chrome.scripting.executeScript`
+按需在目标 tab 的 `MAIN` world 注入本地 `vendor/html2canvas.min.js`
+与 `screenshot_main.js`，从而使执行 JS 的上下文能访问截图函数。
+`content.js` 只写入扩展已注入标记，不再预加载 html2canvas。
+这属于 DOM 重绘生成的图像，而不是浏览器原生像素截图；复杂跨域内容、视频和部分 CSS 效果可能与屏幕可见内容不同。
 
 参数:
 - `full_page=False`: 是否截整页 (True=完整滚动高度,False=仅可视区域)
@@ -124,9 +127,7 @@
 若结果超过 `screenshot_max_bytes`(默认 200KB)且格式是 JPEG,自动降采样 (quality 40, scale 0.75),
 并在 content 末尾追加 `⚠️ 截图仍超过 N bytes` 提示。
 
-**为什么不用 `chrome.tabs.captureVisibleTab`**: 该 API 只能截**视口**且受权限限制;
-整页截图需要滚动拼接(对 lazy-load 不友好)。html2canvas 把 DOM 重绘成 canvas,对 SVG / 动画支持更完整,
-也避开了截屏在某些反爬场景(指纹检测)被识别的问题。
+**实现取舍：** `chrome.tabs.captureVisibleTab` 仅捕获可见区域；这里采用 html2canvas 支持按 DOM 选择元素及绘制更长区域。不能保证完整还原所有网页，也不保证规避网站风控。
 
 #### `_htmlopt.py` 共享 JS 算法库
 
@@ -176,15 +177,26 @@ uv add websockets aiohttp
 启动 PyAgent,调用:
 
 ```python
-await tool_registry.execute("browser_status")
-# → "浏览器桥已连接 (ws://127.0.0.1:18787) ..."
+import asyncio
+from pyagent.tools.browser import get_bridge
+
+async def main():
+    bridge = get_bridge()
+    if bridge is None:
+        print("浏览器桥尚未初始化，请先创建并 setup Runtime")
+        return
+    await bridge.connect()
+    print("WS 监听状态:", bridge.is_connected())
+    print("扩展客户端已连接:", bridge.has_clients())
+
+asyncio.run(main())
 ```
 
 或通过 LLM 提示工程让 agent 自己调用 `browser_status` 自检。
 
 ## 配置
 
-`pyproject.toml` → `[tool.pyagent]` / `settings.json` / 环境变量 `PYAGENT_BROWSER__*`
+配置文件 `~/.pyagent/settings.json` → 项目 `.pyagent/settings.json` → 环境变量 `PYAGENT_BROWSER__*`；通过 `Settings.browser` 统一管理。
 
 ```python
 BrowserSettings(
@@ -259,13 +271,20 @@ ACK 后等 result 超时 (`default_timeout`) 报 `timeout`。
 只需复制 `bridge.py` + `settings.py` + `exceptions.py` 三个文件:
 
 ```python
-from browser_bridge import BrowserBridge, BrowserSettings
+import asyncio
+from pyagent.tools.browser.bridge import BrowserBridge
+from pyagent.tools.browser.settings import BrowserSettings
 
-bridge = BrowserBridge(BrowserSettings(ws_port=18787))
-await bridge.connect()
-result = await bridge.execute_js("() => document.title")
-# → ExecuteResult(value="...", elapsed_ms=12)
-await bridge.disconnect()
+async def main():
+    bridge = BrowserBridge(BrowserSettings(ws_port=18787))
+    try:
+        await bridge.connect()
+        result = await bridge.execute_js("document.title")
+        print(result.data)
+    finally:
+        await bridge.disconnect()
+
+asyncio.run(main())
 ```
 
 `TabInfo` / `ExecuteResult` 是 dataclass,序列化友好。
@@ -283,12 +302,12 @@ await bridge.disconnect()
 | `list_tabs(url_pattern="")` | 同步列出已知 tab (可按 url_pattern 过滤) |
 | `switch_tab(tab_id)` | 切换默认 tab |
 | `set_default_tab(tab_id)` | 显式设默认 tab |
-| `is_connected` / `default_tab_id` / `settings` | 只读属性 |
+| `is_connected()` / `default_tab_id` / `settings` | 状态方法与只读属性 |
 
 ## 安全
 
-- WS 默认 `127.0.0.1` — 仅本机进程可连
-- 扩展 `host_permissions: ["<all_urls>"]` 是浏览器自动化的必要权限
-- 扩展不发起任何外网请求
-- LLM 通过 `browser_execute_js` 跑的 JS 等同于在用户浏览器里执行 — 慎用,
-  不要在不受信任的 prompt 下使用此工具
+- WebSocket 默认监听 `127.0.0.1`。服务端拒绝普通网页的 `Origin`，允许 `chrome-extension://` 来源；出于兼容性仍允许**无 Origin** 的本地原生客户端。因此 **Origin 检查不是完整的客户端身份认证**。
+- 不应把桥暴露到 `0.0.0.0` 或公共网络，不应把未经验证的 LLM 指令直接授予浏览器执行权限。
+- 扩展声明 `host_permissions: ["<all_urls>"]`，能够操作所有获准站点。页面脚本也可能执行网络请求，不能承诺完全离线。
+- 显式给出不存在的 `tab_id` 时会返回错误，而不会静默在其它 tab 执行。
+- 目前还没有覆盖真实扩展安装、登录网站、导航以及截图的完整端到端自动化测试。

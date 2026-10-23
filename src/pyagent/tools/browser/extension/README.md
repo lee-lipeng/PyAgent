@@ -9,9 +9,10 @@
 |------|------|
 | `manifest.json` | MV3 清单 |
 | `background.js` | WS 服务端客户端,接收执行请求并用 `chrome.scripting.executeScript` 注入到目标 tab |
-| `content.js` | content script: 注入 `__pyagent_screenshotHtml` (基于 html2canvas) 给 `browser_screenshot` 用 |
-| `popup.html` + `popup.js` | 工具栏图标点开的小窗,心跳检测 WS 服务 |
-| `vendor/html2canvas.min.js` | 本地 html2canvas (优先用本地副本,失败回退 CDN) |
+| `content.js` | isolated content script，只标记扩展已注入 |
+| `screenshot_main.js` | 注册 `window.__pyagent_screenshotHtml`；与截图执行代码处于同一 MAIN world |
+| `popup.html` + `popup.js` | 工具栏图标弹窗及连接状态检测 |
+| `vendor/html2canvas.min.js` | 本地 html2canvas，截图时按需注入到 MAIN world |
 
 ## 安装
 
@@ -27,7 +28,7 @@
 
 ## 安全提示
 
-- WS 服务默认绑定 `127.0.0.1` — 仅本机可连
-- `host_permissions: ["<all_urls>"]` 让扩展能在所有 http/https 页面注入 JS
-  (这是浏览器自动化的必要权限)
-- 扩展不发起任何外网请求,完全离线工作
+- WS 服务默认绑定 `127.0.0.1`；服务端拒绝常见网页来源的 Origin，但**未做客户端密钥认证**，本地进程仍可能连接。
+- `host_permissions: ["<all_urls>"]` 意味着扩展可以在所有获准的 http/https 页面执行代码，谨慎使用。
+- `browser_execute_js` 和网页本身可能访问网络；不要把“本地 WebSocket 连接”理解为严格离线沙箱。
+- 更改 `background.js` / `screenshot_main.js` 后，在 `chrome://extensions/` 点击「重新加载」，再重新打开目标网页测试。

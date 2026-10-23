@@ -80,11 +80,16 @@ class ToolExecutor:
         if force_sequential:
             results = [await self._exec_one(tc, signal) for tc in tool_calls]
         else:
-            results = await asyncio.gather(
-                *[self._exec_one(tc, signal) for tc in tool_calls],
-                return_exceptions=False,
-            )
-            results = list(results)
+            tasks = [asyncio.create_task(self._exec_one(tc, signal)) for tc in tool_calls]
+            try:
+                results = list(await asyncio.gather(*tasks))
+            except BaseException:
+                # gather 在一个任务异常时不会自动取消其他任务。
+                # 必须回收整批任务，避免 Agent 返回后仍执行写文件等副作用。
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         return results
 
@@ -107,6 +112,9 @@ class ToolExecutor:
         - return dict (新 args)                  → 替换入参
         - return None                            → 不影响当前值（默认 args）
         """
+        if signal is not None and signal.is_set():
+            return await self._emit_aborted(tool_call)
+
         event = Event(
             type=EventType.BEFORE_TOOL,
             payload={
@@ -118,11 +126,8 @@ class ToolExecutor:
         # 初始值 = 当前 args；handler 返回 ToolResult 表示彻底替换工具执行。
         result = await self._hooks.dispatch(event, initial=tool_call.arguments)
 
-        # 1) handler 直接返回 ToolResult → 完全替代工具执行
-        if isinstance(result.value, ToolResult):
-            return await self._emit_after(tool_call, result.value, result.value.is_error)
-
-        # 2) handler 取消 → 返回错误 ToolResult
+        # 取消必须先于 Hook 的替代结果处理，否则可能绕过权限 Hook。
+        # 1) handler 取消 → 返回错误 ToolResult
         if result.cancelled:
             cancelled_result = ToolResult(
                 content=result.cancel_reason or f"工具 {tool_call.name} 已被 Hook 取消",
@@ -130,6 +135,14 @@ class ToolExecutor:
                 details={"error": "hook_cancelled"},
             )
             return await self._emit_after(tool_call, cancelled_result, is_error=True)
+
+        # Abort 在 Hook 执行期间触发时也不得继续启动工具。
+        if signal is not None and signal.is_set():
+            return await self._emit_aborted(tool_call)
+
+        # 2) handler 直接返回 ToolResult → 完全替代工具执行
+        if isinstance(result.value, ToolResult):
+            return await self._emit_after(tool_call, result.value, result.value.is_error)
 
         # 3) 否则把 result.value（可能已被改写 args）当作 args 继续执行
         tool_call.arguments = result.value
@@ -156,6 +169,10 @@ class ToolExecutor:
             )
             return await self._emit_after(tool_call, validation_err, is_error=True)
 
+        # 参数校验结束后仍需检查 Abort；某些工具不主动监听 signal。
+        if signal is not None and signal.is_set():
+            return await self._emit_aborted(tool_call)
+
         # 执行（透传 cancel signal，工具可监听 signal 提前终止）
         try:
             exec_result = await tool.execute(tool_call.id, validated_args, signal=signal)
@@ -168,6 +185,15 @@ class ToolExecutor:
             )
 
         return await self._emit_after(tool_call, exec_result, exec_result.is_error)
+
+    async def _emit_aborted(self, tool_call: ToolCall) -> ToolResult:
+        """为未执行的工具生成取消结果，保持批次结果数量和顺序。"""
+        result = ToolResult(
+            content=f"工具 {tool_call.name} 已中止",
+            is_error=True,
+            details={"error": "aborted"},
+        )
+        return await self._emit_after(tool_call, result, is_error=True)
 
     async def _emit_after(
         self,

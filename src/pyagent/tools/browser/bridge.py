@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import socket
 import time
 import uuid
@@ -113,6 +114,8 @@ class BrowserBridge:
         self._acks: dict[str, bool] = {}
         # 请求 -> 浏览器返回的最终 result/error
         self._results: dict[str, dict[str, Any]] = {}
+        # 仅接收活跃调用的协议消息，避免超时/取消后的迟到消息造成内存积累。
+        self._active_exec_ids: set[str] = set()
         # 请求 -> progress 回调队列 (bg 推送的导航进度通过这里流式传给 LLM)
         self._progress: dict[str, list[dict[str, Any]]] = {}
         # 请求 -> 等待 progress 的 Event
@@ -197,6 +200,9 @@ class BrowserBridge:
             self._results.pop(pending_id, None)
         for pending_id in list(self._acks.keys()):
             self._acks.pop(pending_id, None)
+        self._active_exec_ids.clear()
+        self._progress.clear()
+        self._progress_events.clear()
 
     def is_connected(self) -> bool:
         """当前是否可用 (本地 WS 服务端在听 / 远端 master 已配置)。
@@ -289,9 +295,24 @@ class BrowserBridge:
     async def _on_client_connect(self, ws: Any) -> None:
         """新客户端连接 — 注册并启动该连接的 recv loop。"""
         peer = "unknown"
+        clean_close = True
         try:
             with contextlib.suppress(Exception):
                 peer = f"{ws.remote_address[0]}:{ws.remote_address[1]}"
+
+            # 拒绝普通网页发起的跨站 WS 连接；Chrome 扩展 Origin 是固定格式。
+            # 无 Origin 的原生本地客户端仍保持兼容，此检查不等同于身份认证。
+            request = getattr(ws, "request", None)
+            headers = getattr(request, "headers", None) or getattr(
+                ws, "request_headers", None
+            )
+            origin = headers.get("Origin") if headers else None
+            if origin is not None and not re.fullmatch(
+                r"chrome-extension://[a-p]{32}", origin
+            ):
+                logger.warning("拒绝非 Chrome 扩展的 WebSocket Origin: %s", origin)
+                await ws.close(code=1008, reason="Untrusted WebSocket Origin")
+                return
 
             # 客户端角色:unknown(初始)→ bg(发过 ready/tabs_update/ack/result)→
             # popup(只发过 ping 然后 close,不算可用客户端)
@@ -299,7 +320,6 @@ class BrowserBridge:
             logger.info(f"新 WS 客户端连入:{peer} (role=unknown)")
             self._ws_clients.add(ws)
             logger.info(f"浏览器扩展已注册 (当前{len(self._ws_clients)}个客户端) — 等扩展发 ready/tabs_update...")
-            clean_close = True  # 默认正常关闭;ConnectionClosed 异常路径置 False
             try:
                 async for msg in ws:
                     clean_close = False
@@ -489,8 +509,10 @@ class BrowserBridge:
         让扩展端 runCodeOnTab 自己挑当前 active http/https tab 或新开一个。
         这样 LLM 调 navigate 不会因为"服务端没 tab 缓存"就失败。
         """
-        if tab_id and tab_id in self._tabs:
-            return tab_id
+        if tab_id is not None:
+            if tab_id in self._tabs:
+                return tab_id
+            raise BrowserNotConnectedError(f"指定的浏览器 Tab 不存在: {tab_id}")
         if self._default_tab_id and self._default_tab_id in self._tabs:
             return self._default_tab_id
         alive = [t for t in self._tabs.values() if t.url]
@@ -536,11 +558,17 @@ class BrowserBridge:
             if target_ws is None:
                 # 全是 popup-only,真扩展还没升级 role — 挑第一个 unknown
                 target_ws = next(iter(self._ws_clients))
+            # 发送前注册，避免极快到达的 ACK/结果被误判为迟到消息。
+            self._active_exec_ids.add(exec_id)
             try:
                 await target_ws.send(payload)
             except websockets.ConnectionClosed as exc:
+                self._active_exec_ids.discard(exec_id)
                 self._ws_clients.discard(target_ws)
                 raise BrowserNotConnectedError(f"WS 已断开: {exc}") from exc
+            except BaseException:
+                self._active_exec_ids.discard(exec_id)
+                raise
 
         # 启动 progress 监听(如果有回调)
         progress_task: asyncio.Task | None = None
@@ -553,6 +581,8 @@ class BrowserBridge:
         try:
             while exec_id not in self._results:
                 await asyncio.sleep(0.05)
+                if self._closed:
+                    raise BrowserNotConnectedError("浏览器桥已断开，当前请求终止")
                 if not acked and exec_id in self._acks:
                     acked = True
                     # ACK 后重新计时 (浏览器开始执行 JS)
@@ -565,7 +595,11 @@ class BrowserBridge:
                     if acked:
                         raise BrowserTimeoutError(f"浏览器已 ACK 但 {timeout}s 内未返回结果")
                     raise BrowserDeliveryError("指令未送达浏览器 (未收到 ACK,可能扩展未运行 / WS 断开)")
+            result = self._results.pop(exec_id)
         finally:
+            self._active_exec_ids.discard(exec_id)
+            self._acks.pop(exec_id, None)
+            self._results.pop(exec_id, None)
             if progress_task is not None:
                 progress_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -573,8 +607,6 @@ class BrowserBridge:
             self._progress.pop(exec_id, None)
             self._progress_events.pop(exec_id, None)
 
-        result = self._results.pop(exec_id)
-        self._acks.pop(exec_id, None)
         if not result.get("success", True):
             raise BrowserExecutionError(result.get("data") or "unknown error")
 
@@ -669,7 +701,7 @@ class BrowserBridge:
                 ws._pyagent_role = "popup"
         elif mtype == "ack":
             exec_id = msg.get("id")
-            if exec_id:
+            if exec_id in self._active_exec_ids:
                 self._acks[exec_id] = True
             if ws is not None:
                 ws._pyagent_role = "bg"
@@ -677,7 +709,7 @@ class BrowserBridge:
             # 浏览器推送的中间进度(tab 已创建 / DOM 已 ready / 重定向等),
             # 让 LLM 在 navigate 还没返回时就能看到状态变化。
             exec_id = msg.get("id")
-            if exec_id:
+            if exec_id in self._active_exec_ids:
                 self._progress.setdefault(exec_id, []).append(
                     {"phase": msg.get("phase", ""), "text": msg.get("text", "")}
                 )
@@ -688,7 +720,7 @@ class BrowserBridge:
                 ws._pyagent_role = "bg"
         elif mtype == "result":
             exec_id = msg.get("id")
-            if exec_id:
+            if exec_id in self._active_exec_ids:
                 # 浏览器协议:`type=result` 是 wrapper,内层 success 决定成败
                 self._results[exec_id] = {
                     "success": bool(msg.get("success", True)),
@@ -699,7 +731,7 @@ class BrowserBridge:
                 ws._pyagent_role = "bg"
         elif mtype == "error":
             exec_id = msg.get("id")
-            if exec_id:
+            if exec_id in self._active_exec_ids:
                 self._results[exec_id] = {
                     "success": False,
                     "data": msg.get("error"),

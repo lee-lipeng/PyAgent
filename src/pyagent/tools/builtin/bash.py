@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal as signal_module
 from collections.abc import Callable
 from typing import Any
 
@@ -32,6 +34,29 @@ class RunBashTool(Tool):
     parameters_model = RunBashArgs
     execution_mode = "sequential"  # shell 命令串行执行更安全
 
+    @staticmethod
+    async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+        """终止命令及其子进程（POSIX），并回收主进程。"""
+        if os.name != "nt":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal_module.SIGKILL)
+        elif proc.returncode is None:
+            # Windows: 同时结束 cmd.exe 与子进程树，避免只杀 shell 留下后台任务。
+            try:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(proc.pid),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=5)
+            except (OSError, TimeoutError):
+                pass
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+        if proc.returncode is None:
+            await proc.wait()
+
     async def execute(
         self,
         tool_call_id: str,
@@ -43,7 +68,15 @@ class RunBashTool(Tool):
         timeout = args.get("timeout", 120)
         cwd = args.get("cwd")
 
-        # 根据平台选择 shell
+        # 已取消的任务不应启动新进程。
+        if signal is not None and signal.is_set():
+            return ToolResult(
+                content=f"命令被用户中止: {command}",
+                is_error=True,
+                details={"error": "aborted", "command": command},
+            )
+
+        # POSIX 使用独立进程组，以便同时结束 shell 和它启动的子进程。
         shell_cmd = ["cmd", "/c", command] if os.name == "nt" else ["bash", "-c", command]
 
         try:
@@ -52,6 +85,7 @@ class RunBashTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                start_new_session=os.name != "nt",
             )
         except Exception as exc:
             return ToolResult(
@@ -78,8 +112,7 @@ class RunBashTool(Tool):
 
             # abort signal 触发
             if signal is not None and signal.is_set():
-                proc.kill()
-                await proc.wait()
+                await self._terminate_process(proc)
                 return ToolResult(
                     content=f"命令被用户中止: {command}",
                     is_error=True,
@@ -88,8 +121,7 @@ class RunBashTool(Tool):
 
             # 超时
             if not done:
-                proc.kill()
-                await proc.wait()
+                await self._terminate_process(proc)
                 return ToolResult(
                     content=f"命令超时（{timeout}秒），已终止。命令: {command}",
                     is_error=True,
@@ -99,10 +131,16 @@ class RunBashTool(Tool):
             # 正常完成
             stdout_bytes, stderr_bytes = comm_task.result()
 
+        except asyncio.CancelledError:
+            await self._terminate_process(proc)
+            raise
         finally:
             comm_task.cancel()
+            tasks = [comm_task]
             if signal_task is not None:
                 signal_task.cancel()
+                tasks.append(signal_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")

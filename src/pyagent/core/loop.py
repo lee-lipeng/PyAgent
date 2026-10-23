@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -25,8 +27,10 @@ from pyagent.core.context import RuntimeContext
 from pyagent.core.context_builder import ContextBuilder
 from pyagent.hooks.types import EventType
 from pyagent.llm.token_estimator import ContextUsage
+from pyagent.llm.types import ToolCall
 from pyagent.session import Session
 from pyagent.session.messages import AssistantMessage, ToolResultMessage, UserMessage
+from pyagent.tools.base import ToolResult
 from pyagent.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -94,18 +98,16 @@ class AgentLoop:
 
         从 Agent 的系统提示词和会话的上下文窗口配置创建 ContextBuilder。
         """
-        if self._context_builder is None:
-            system_prompt = self.agent.build_system_prompt()
-            context_window = session.metadata.context_window
-            threshold = session.metadata.compaction_threshold
-            self.context_usage = ContextUsage(
-                limit=context_window or 128000,
-                threshold=threshold,
-            )
-            self._context_builder = ContextBuilder(
-                system_prompt=system_prompt,
-                context_usage=self.context_usage,
-            )
+        # 不同任务的系统提示词及 token 预算必须相互隔离。
+        system_prompt = self.agent.build_system_prompt(session.metadata.system_prompt or None)
+        self.context_usage = ContextUsage(
+            limit=session.metadata.context_window or 128000,
+            threshold=session.metadata.compaction_threshold,
+        )
+        self._context_builder = ContextBuilder(
+            system_prompt=system_prompt,
+            context_usage=self.context_usage,
+        )
         return self._context_builder
 
     async def run(
@@ -144,7 +146,6 @@ class AgentLoop:
 
         turns = 0
         final_response = ""
-        last_usage = None
 
         try:
             while turns < self.agent.max_turns:
@@ -160,7 +161,20 @@ class AgentLoop:
 
                 turns += 1
 
-                messages = builder.build(session, last_usage)
+                messages = builder.build(session)
+
+                # 仅在工具批次结果全部写入 Session 后、下一次 LLM 请求前压缩，
+                # 避免压缩过程截断 assistant(tool_calls) 与 tool_result 的配对关系。
+                if (
+                    self._compaction is not None
+                    and self.context_usage is not None
+                    and self._compaction.should_compact(messages, self.context_usage)
+                ):
+                    compacted = await self._compaction.compact_session(
+                        session, self.context_usage, force=False
+                    )
+                    if compacted.success:
+                        messages = builder.build(session)
 
                 # 单一 dispatch：handler 可取消（return HookControl）或链式修改 messages
                 llm_pre = await self.agent.dispatch(
@@ -184,11 +198,45 @@ class AgentLoop:
                         messages=messages,
                         tools=tools if tools else None,
                     )
-                    async for chunk in chunks:
-                        if chunk.delta and on_chunk:
-                            on_chunk(chunk.delta)
+                    # 并行监听用户 Abort；不能依赖服务端继续推送下一个 chunk。
+                    async def consume_stream(stream: Any) -> None:
+                        async for chunk in stream:
+                            if chunk.delta and on_chunk:
+                                on_chunk(chunk.delta)
+
+                    stream_task = asyncio.create_task(consume_stream(chunks))
+                    abort_task = asyncio.create_task(ctx.cancel_signal.wait())
+                    try:
+                        done, _ = await asyncio.wait(
+                            {stream_task, abort_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if abort_task in done and ctx.is_cancelled():
+                            stream_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await stream_task
+                            await self.agent.dispatch(EventType.AGENT_ABORT, turns=turns)
+                            return LoopResult(
+                                success=False,
+                                turns=turns,
+                                stop_reason="cancelled",
+                            )
+                        await stream_task
+                    finally:
+                        abort_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await abort_task
+                        if not stream_task.done():
+                            stream_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await stream_task
 
                     response = agg.result()
+                    if ctx.is_cancelled():
+                        await self.agent.dispatch(EventType.AGENT_ABORT, turns=turns)
+                        return LoopResult(
+                            success=False, turns=turns, stop_reason="cancelled"
+                        )
                 except Exception as exc:
                     logger.exception("LLM 调用失败")
                     await self.agent.dispatch(
@@ -203,18 +251,21 @@ class AgentLoop:
                         error=str(exc),
                     )
 
-                # 更新 usage
-                last_usage = response.usage
-
-                response = (
-                    await self.agent.dispatch(
-                        EventType.AFTER_LLM,
-                        initial=response,
-                        turn=turns,
-                        has_tool_calls=response.has_tool_calls,
-                        usage=response.usage.model_dump() if response.usage else {},
+                llm_post = await self.agent.dispatch(
+                    EventType.AFTER_LLM,
+                    initial=response,
+                    turn=turns,
+                    has_tool_calls=response.has_tool_calls,
+                    usage=response.usage.model_dump() if response.usage else {},
+                )
+                if llm_post.cancelled:
+                    return LoopResult(
+                        success=False,
+                        turns=turns,
+                        stop_reason="llm_cancelled",
+                        error=llm_post.cancel_reason,
                     )
-                ).value
+                response = llm_post.value
 
                 # 构造 assistant 消息
                 assistant_msg: dict[str, Any] = {"role": "assistant"}
@@ -228,7 +279,9 @@ class AgentLoop:
                             "function": {
                                 "name": tc.name,
                                 "arguments": (
-                                    tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments)
+                                    tc.arguments
+                                    if isinstance(tc.arguments, str)
+                                    else json.dumps(tc.arguments)
                                 ),
                             },
                         }
@@ -242,28 +295,18 @@ class AgentLoop:
                     )
                 )
 
-                # 上下文压缩
-                if (
-                    self._compaction is not None
-                    and self.context_usage is not None
-                    and (self.context_usage.is_threshold_reached or self.context_usage.is_overflow)
-                ):
-                    logger.info(
-                        "触发上下文压缩: used=%s, limit=%s",
-                        self.context_usage.used,
-                        self.context_usage.limit,
-                    )
-
-                    await self._compaction.compact_session(
-                        session,
-                        self.context_usage,
-                        force=True,
-                    )
-
                 # 检查是否有工具调用
                 if not response.has_tool_calls:
-                    # 无工具调用，准备结束循环
+                    # 输出长度耗尽不代表自然结束，不能误报为成功。
                     final_response = response.content or ""
+                    if response.stop_reason == "length":
+                        return LoopResult(
+                            success=False,
+                            final_response=final_response,
+                            turns=turns,
+                            stop_reason="output_truncated",
+                            error="模型达到最大输出 Token 限制，响应可能不完整",
+                        )
 
                     # 如果 steering 队列有内容，继续执行
                     if ctx.has_steering():
@@ -294,6 +337,15 @@ class AgentLoop:
                         count=len(tool_calls),
                     )
                     if batch_pre.cancelled:
+                        # assistant 消息已经记录，需补齐全部工具结果以维持会话有效性。
+                        for tc in response.tool_calls:
+                            session.add_message(
+                                ToolResultMessage(
+                                    content=batch_pre.cancel_reason or "工具批次被取消",
+                                    tool_call_id=tc.id,
+                                    name=tc.name,
+                                )
+                            )
                         return LoopResult(
                             success=False,
                             turns=turns,
@@ -302,24 +354,99 @@ class AgentLoop:
                         )
                     tool_calls = batch_pre.value
 
+                    # Hook 可以修改工具名/参数，但数量、顺序和调用 ID 必须保持不变。
+                    expected_ids = [tc["id"] for tc in assistant_msg["tool_calls"]]
+                    if (
+                        not isinstance(tool_calls, list)
+                        or len(tool_calls) != len(expected_ids)
+                        or any(not isinstance(tc, ToolCall) for tc in tool_calls)
+                        or [tc.id for tc in tool_calls] != expected_ids
+                    ):
+                        for item in assistant_msg["tool_calls"]:
+                            session.add_message(
+                                ToolResultMessage(
+                                    content="Hook 返回的工具批次与原始调用 ID 不一致",
+                                    tool_call_id=item["id"],
+                                    name=item["function"]["name"],
+                                )
+                            )
+                        return LoopResult(
+                            success=False,
+                            turns=turns,
+                            stop_reason="invalid_tool_batch",
+                            error="Hook 不允许增加、删除或修改工具调用 ID",
+                        )
+
                     results = await self.agent.tool_executor.execute_batch(
                         tool_calls,
                         signal=ctx.cancel_signal,
                     )
-                    results = (
-                        await self.agent.dispatch(
-                            EventType.TOOL_BATCH_END,
-                            initial=results,
-                            turn=turns,
-                            count=len(results),
-                            failed_count=sum(r.is_error for r in results),
-                        )
-                    ).value
+                    # BEFORE_TOOL Hook 可能继续改写实际参数，必须记录最终执行参数。
+                    session.messages[-1] = AssistantMessage(
+                        content=response.content,
+                        tool_calls=[
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    )
+
+                    batch_end = await self.agent.dispatch(
+                        EventType.TOOL_BATCH_END,
+                        initial=results,
+                        turn=turns,
+                        count=len(results),
+                        failed_count=sum(r.is_error for r in results),
+                    )
+                    if batch_end.cancelled:
+                        # 工具已经执行，保留原始结果，不丢失审计记录。
+                        logger.warning("TOOL_BATCH_END 取消结果改写：%s", batch_end.cancel_reason)
+                    elif (
+                        isinstance(batch_end.value, list)
+                        and len(batch_end.value) == len(tool_calls)
+                        and all(isinstance(item, ToolResult) for item in batch_end.value)
+                    ):
+                        results = batch_end.value
+                    else:
+                        logger.warning("TOOL_BATCH_END 返回无效结果，保留原始结果")
                 except PermissionError as exc:
+                    for item in assistant_msg["tool_calls"]:
+                        session.add_message(
+                            ToolResultMessage(
+                                content=f"工具执行权限被拒绝: {exc}",
+                                tool_call_id=item["id"],
+                                name=item["function"]["name"],
+                            )
+                        )
                     return LoopResult(
                         success=False,
                         turns=turns,
                         stop_reason="permission_denied",
+                        error=str(exc),
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    # 任何工具批次异常都要为已写入的 assistant 调用补齐结果。
+                    # 取消异常保留协程的取消语义，由 Runtime 最终保存 Session。
+                    for item in assistant_msg["tool_calls"]:
+                        session.add_message(
+                            ToolResultMessage(
+                                content=f"工具批次未完成: {exc or type(exc).__name__}",
+                                tool_call_id=item["id"],
+                                name=item["function"]["name"],
+                            )
+                        )
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return LoopResult(
+                        success=False,
+                        turns=turns,
+                        stop_reason="tool_error",
                         error=str(exc),
                     )
 
@@ -331,6 +458,16 @@ class AgentLoop:
                             tool_call_id=tc.id,
                             name=tc.name,
                         )
+                    )
+
+                # 即使工具提示终止，也必须优先尊重执行期间收到的中止信号。
+                if ctx.is_cancelled():
+                    await self.agent.dispatch(EventType.AGENT_ABORT, turns=turns)
+                    return LoopResult(
+                        success=False,
+                        final_response=final_response,
+                        turns=turns,
+                        stop_reason="cancelled",
                     )
 
                 # turn 边界：drain steering 队列
@@ -345,7 +482,7 @@ class AgentLoop:
 
                     logger.info(f"注入{len(steered)}条改向消息")
 
-                if all(r.terminate for r in results):
+                if results and all(r.terminate for r in results):
                     final_response = next((r.content for r in results if r.content), "")
                     return LoopResult(
                         success=True,

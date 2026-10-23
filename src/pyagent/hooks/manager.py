@@ -104,12 +104,14 @@ class HookManager:
                     result = await result
 
                 if isinstance(result, HookControl):
-                    # 取消信号直接短路，不再执行后续 handler
-                    return DispatchResult(
-                        cancelled=result.cancel,
-                        cancel_reason=result.reason,
-                        value=current,
-                    )
+                    if result.cancel:
+                        # 只有实际取消才短路，防止跳过后续权限检查。
+                        return DispatchResult(
+                            cancelled=True,
+                            cancel_reason=result.reason,
+                            value=current,
+                        )
+                    continue
                 if result is not None:
                     # 链式 transform：把返回值作为下一环节的 current
                     current = result

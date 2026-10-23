@@ -43,11 +43,15 @@ class LLMClient:
         api_key: str | None = None,
         base_url: str | None = None,
         timeout: float = 120.0,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
         self.timeout = timeout
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
     async def stream(
         self,
@@ -86,6 +90,10 @@ class LLMClient:
             call_kwargs["api_base"] = self.base_url
         if tools:
             call_kwargs["tools"] = tools
+        if self.temperature is not None:
+            call_kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            call_kwargs["max_tokens"] = self.max_tokens
         call_kwargs.update(kwargs)
 
         try:

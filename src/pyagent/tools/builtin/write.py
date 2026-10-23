@@ -13,6 +13,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
+import tempfile
 from collections.abc import Callable
 from typing import Any
 
@@ -27,6 +30,25 @@ class WriteFileArgs(BaseModel):
 
     path: str = Field(description="要写入的文件路径。绝对路径原样使用，相对路径相对当前工作目录。")
     content: str = Field(description="文件内容（完整内容，非增量）")
+
+
+def _atomic_write_text(path, content: str) -> None:
+    """先写同目录临时文件，再原子替换，失败保留目标文件。"""
+    from pathlib import Path
+
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        if path.exists():
+            # 保留现有文件的可执行位及权限位，避免编辑后脚本无法执行。
+            os.chmod(temp_path, stat.S_IMODE(path.stat().st_mode))
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _resolve_path(requested: str):
@@ -67,7 +89,7 @@ class WriteFileTool(Tool):
             )
 
         try:
-            path.write_text(content, encoding="utf-8")
+            _atomic_write_text(path, content)
         except Exception as exc:
             return ToolResult(
                 content=f"写入文件失败: {exc}",

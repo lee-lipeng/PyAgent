@@ -143,7 +143,10 @@ class SkillLoader:
             frontmatter = SkillFrontmatter(
                 name=name,
                 description=desc,
-                disable_model_invocation=data.get("disable-model-invocation", False),
+                disable_model_invocation=data.get(
+                    "disable-model-invocation",
+                    data.get("disable_model_invocation", False),
+                ),
                 license=data.get("license"),
                 compatibility=data.get("compatibility"),
                 metadata=data.get("metadata", {}),

@@ -34,6 +34,25 @@ async function runCodeOnTab(tabId, code) {
     }
     numericId = candidate.id;
   }
+  // 截图辅助函数必须与 Python 发送的页面 JS 运行在同一个 MAIN 世界。
+  // 按需注入，避免在每个网页的 content script 里预加载大型截图依赖。
+  if (typeof code === 'string' && code.includes('window.__pyagent_screenshotHtml(')) {
+    const target = { tabId: numericId, allFrames: false };
+    const ready = await chrome.scripting.executeScript({
+      target,
+      func: () =>
+        typeof window.__pyagent_screenshotHtml === 'function' &&
+        typeof window.html2canvas === 'function',
+      world: 'MAIN',
+    });
+    if (!ready[0]?.result) {
+      await chrome.scripting.executeScript({
+        target,
+        files: ['vendor/html2canvas.min.js', 'screenshot_main.js'],
+        world: 'MAIN',
+      });
+    }
+  }
   const injectionResults = await chrome.scripting.executeScript({
     target: { tabId: numericId, allFrames: false },
     func: (codeString) => {

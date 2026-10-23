@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'refactor/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+      - name: Check browser extension JS syntax
+        run: |
+          node --check src/pyagent/tools/browser/extension/background.js
+          node --check src/pyagent/tools/browser/extension/content.js
+          node --check src/pyagent/tools/browser/extension/screenshot_main.js
+      - name: Lint changed core modules
+        run: >-
+          uv run --no-sync ruff check
+          src/pyagent/core/agent.py
+          src/pyagent/core/loop.py
+          src/pyagent/core/runtime.py
+          src/pyagent/core/compaction.py
+          src/pyagent/hooks/builtin.py
+          src/pyagent/hooks/manager.py
+          src/pyagent/session/store.py
+          src/pyagent/tools/schema.py
+          src/pyagent/tools/executor.py
+          src/pyagent/tools/discovery.py
+          src/pyagent/utils/loader.py
+          src/pyagent/config/settings.py
+          src/pyagent/config/loader.py
+          src/pyagent/cli/app.py
+          src/pyagent/tools/builtin/write.py
+          src/pyagent/tools/builtin/edit.py
+          src/pyagent/skills/loader.py
+          src/pyagent/tools/builtin/bash.py
+          src/pyagent/llm/client.py
+          src/pyagent/llm/streaming.py
+          tests

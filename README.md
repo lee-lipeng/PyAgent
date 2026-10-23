@@ -12,28 +12,31 @@ AI Agent 工具包，借鉴 [Pi](https://github.com/earendil-works/pi) 设计理
 
 ## 快速开始
 
+推荐 Python 3.12 和 [uv](https://docs.astral.sh/uv/)：
+
 ```bash
-# 安装
-uv pip install -e .
-
-# 配置 API Key
-export OPENAI_API_KEY=sk-...
-
-# 启动 CLI REPL
-pyagent
+uv sync --group dev
+# 按所选模型 Provider 配置 API Key，并设置 llm.model（默认模型是 MiniMax）。
+# 示例：export OPENAI_API_KEY="your-api-key"
+#       export PYAGENT_LLM__MODEL="openai/gpt-4o-mini"
+uv run pyagent
 ```
 
-PyAgent 也可以直接在代码里调用：
+Python SDK 应在同一事件循环里创建、使用和关闭 Runtime：
 
 ```python
 import asyncio
+
 from pyagent.config.loader import load_settings
 from pyagent.core.runtime import Runtime
 
 async def main():
     runtime = Runtime(load_settings())
-    result = await runtime.run("用一句话介绍你自己。")
-    print(result.final_response)
+    try:
+        result = await runtime.run("用一句话介绍你自己。")
+        print(result.final_response)
+    finally:
+        await runtime.teardown()
 
 asyncio.run(main())
 ```
@@ -136,11 +139,11 @@ Runtime.run(query, session?, on_chunk?)
 2. **零硬编码 selector**：工具注册表只暴露 OpenAI schema，LLM 自己决定调用哪个工具、传什么参数。
 3. **可替换的 LLM**：所有 LLM 调用走 `LLMClient`，换模型只改 `settings.llm.model`，业务代码无感。
 4. **Hook 即插即用**：日志 / 监控 / 权限 / 限流全部以 Hook 形式挂到 `HookManager`，启动时注册，退出时反注册。
-5. **Session 是唯一可变状态**：除了 Session 里的 `messages`，其它组件都是无状态的，方便单实例多任务。
+5. **运行状态隔离**：Session 保存对话历史，Runtime 管理当前运行状态和异步资源。同一个 Runtime 只能同时执行一个 `run()`；多任务需串行化或独立实例。
 
 ## 配置
 
-PyAgent 支持多级配置，优先级从低到高：
+PyAgent 支持配置字段递归合并；优先级从低到高：
 
 ```
 默认值 → ~/.pyagent/settings.json（用户全局）→ .pyagent/settings.json（项目本地）→ 环境变量(PYAGENT_*) → CLI 参数
@@ -148,7 +151,7 @@ PyAgent 支持多级配置，优先级从低到高：
 
 ### 配置文件
 
-在项目根目录创建 `.pyagent/settings.json` 即可覆盖默认配置：
+在项目根目录创建 `.pyagent/settings.json` 即可覆盖用户级同名字段（保留其它字段）：
 
 ```json
 {
@@ -171,7 +174,7 @@ PyAgent 支持多级配置，优先级从低到高：
   },
   "enable_builtin_tools": true,
   "enable_builtin_skills": true,
-  "log_level": "INFO"
+  "log": {"level": "INFO"}
 }
 ```
 
@@ -179,7 +182,7 @@ PyAgent 支持多级配置，优先级从低到高：
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `llm.model` | `str` | `openai/gpt-4o-mini` | litellm 模型标识，支持 `openai/`、`anthropic/`、`gemini/` 等前缀 |
+| `llm.model` | `str` | `minimax/MiniMax-M3` | litellm 模型标识，支持 `openai/`、`anthropic/`、`gemini/` 等前缀 |
 | `llm.api_key` | `str\|null` | `null` | API 密钥。为 `null` 时从环境变量读取（如 `OPENAI_API_KEY`） |
 | `llm.base_url` | `str\|null` | `null` | 自定义 API 端点，用于代理或兼容接口 |
 | `llm.temperature` | `float` | `0.7` | 采样温度，越高越随机 |
@@ -192,7 +195,7 @@ PyAgent 支持多级配置，优先级从低到高：
 | `session.dir` | `str\|null` | `null` | 会话存储目录，`null` 时用 `~/.pyagent/sessions/` |
 | `enable_builtin_tools` | `bool` | `true` | 是否加载内置工具（read/write/edit/bash/grep/find/ls） |
 | `enable_builtin_skills` | `bool` | `true` | 是否加载内置技能（coding/research/testing/debugging/planning/git-workflow/create-prompt/create-skill） |
-| `log_level` | `str` | `INFO` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR` |
+| `log.level` | `str` | `DEBUG` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR` |
 
 ### 环境变量
 
@@ -205,8 +208,8 @@ export PYAGENT_LLM__MODEL="anthropic/claude-3-5-sonnet"
 # 覆盖 agent.max_turns
 export PYAGENT_AGENT__MAX_TURNS=10
 
-# 覆盖 log_level
-export PYAGENT_LOG_LEVEL=DEBUG
+# 覆盖 log.level
+export PYAGENT_LOG__LEVEL=DEBUG
 ```
 
 ## 作为 Python SDK 使用
@@ -215,17 +218,17 @@ CLI 只是 PyAgent 的一种入口。整个 Runtime 是纯 Python 库，可以�
 
 ### 一次性速查表
 
-PyAgent 的公开 API 集中在 5 个模块，全部从 `pyagent` 包顶层 re-export：
+PyAgent 的公开 API 集中在 5 个模块，全部从 各子包按需导出（`pyagent` 包顶层目前仅提供 `__version__`）：
 
 | 模块 | 代表导出 | 用途 |
 |------|---------|------|
-| `pyagent.config` | `Settings`, `load_settings` | 多级配置加载 |
-| `pyagent.core` | `Runtime`, `LoopResult`, `AgentLoop` | Agent 运行时主入口 |
+| `pyagent.config.settings` / `pyagent.config.loader` | `Settings` / `load_settings` | 多级配置加载 |
+| `pyagent.core.runtime` / `pyagent.core.loop` | `Runtime` / `LoopResult`, `AgentLoop` | Agent 运行时主入口 |
 | `pyagent.hooks` | `HookManager`, `Event`, `EventType`, `HookControl`, `DispatchResult` | 事件总线 |
-| `pyagent.tools` | `Tool`, `ToolResult`, `tool` | 工具基类与装饰器 |
+| `pyagent.tools` / `pyagent.tools.decorators` | `Tool`, `ToolResult` / `tool` | 工具基类与装饰器 |
 | `pyagent.skills` | `SkillManager`, `Skill` | 技能（prompt 片段）注册中心 |
 | `pyagent.session` | `Session`, `SessionStore` | 会话与持久化 |
-| `pyagent.llm` | `LLMClient`, `ContextUsage` | LLM 客户端 + token 监控 |
+| `pyagent.llm.client` / `pyagent.llm.token_estimator` | `LLMClient` / `ContextUsage` | LLM 客户端 + token 监控 |
 
 ### 核心 API：`Runtime`
 
@@ -235,7 +238,7 @@ PyAgent 的公开 API 集中在 5 个模块，全部从 `pyagent` 包顶层 re-e
 |-----|------|------|
 | `Runtime(settings)` | `__init__` | 用 `Settings` 构造实例 |
 | `load_settings(cwd=None)` | 函数 | 按多级优先级加载 `Settings`（默认值 → 用户全局 → 项目本地 → 环境变量） |
-| `runtime.setup()` | 方法 | 主动触发组件初始化（LLMClient / Tool / Skill / Session / Agent / Loop） |
+| `await runtime.setup()` | 异步方法 | 主动触发组件初始化（LLMClient / Tool / Skill / Session / Agent / Loop） |
 | `await runtime.run(query, session?, on_chunk?)` | 方法 | 执行一轮 Agent 循环，返回 `LoopResult` |
 | `runtime.create_session(title, system_prompt, mode)` | 方法 | 建新会话（`mode="persistent"\|"ephemeral"`） |
 | `runtime.load_session(id)` / `save_session(s)` / `delete_session(id)` | 方法 | 会话 CRUD |
@@ -246,175 +249,138 @@ PyAgent 的公开 API 集中在 5 个模块，全部从 `pyagent` 包顶层 re-e
 | `runtime.hooks.on(EventType.X, handler)` | 方法 | 订阅事件，返回 `unsubscribe` 函数 |
 | `runtime.tool_registry.register(tool)` | 方法 | 注册自定义工具 |
 | `runtime.skill_manager.register(skill)` | 方法 | 注册自定义技能 |
-| `await runtime.shutdown()` | 方法 | 关闭运行时（占位，目前仅 log） |
+| `await runtime.teardown()` | 异步方法 | 关闭浏览器桥并回收后台连接任务；建议放在 `finally` 中 |
 
 ### 1. 最简调用
 
 ```python
 import asyncio
-from pyagent import Settings, load_settings, Runtime
+from pyagent.config.loader import load_settings
+from pyagent.core.runtime import Runtime
 
 async def main():
-    runtime = Runtime(load_settings())  # 第一次 run() 会自动 setup()
-    result = await runtime.run("写一个 Python 装饰器示例。")
-    print(result.final_response)        # LLM 最后一轮纯文本
-    print(result.stop_reason)           # "completed" / "max_turns" / "cancelled" / ...
+    runtime = Runtime(load_settings())
+    try:
+        result = await runtime.run("写一个 Python 装饰器示例")
+        print(result.final_response)
+        print(result.stop_reason)
+    finally:
+        await runtime.teardown()
 
 asyncio.run(main())
 ```
 
-第一次 `run()` 自动调用 `setup()`：发现工具/技能、构造 LLMClient 等。
+第一次 `run()` 会自动 `await setup()`；也可以在同一事件循环中显式 `await runtime.setup()`。
 
 ### 2. 自定义 `Settings`
 
 ```python
 from pathlib import Path
-from pyagent import Settings, Runtime
+from pyagent.config.settings import Settings
+from pyagent.core.runtime import Runtime
 
 settings = Settings(
-    llm={"model": "openai/gpt-4o-mini", "temperature": 0.3, "timeout": 60.0},
-    agent={
-        "system_prompt": "你是一名资深 Python 工程师。",
-        "max_turns": 10,
-        "tool_execution": "parallel",   # 或 "sequential"
-        "context_window": 128000,
-        "compaction_threshold": 0.8,
-        "enable_compaction": True,
-    },
+    llm={"model": "openai/gpt-4o-mini", "temperature": 0.3, "timeout": 60},
+    agent={"max_turns": 10, "tool_execution": "parallel"},
     session={"enabled": True, "dir": Path("./.pyagent_sessions")},
-    hooks={"enabled": True, "blocked_tools": {"bash"}},  # 内置 hook 总开关
-    enable_builtin_tools=True,
-    enable_builtin_skills=True,
+    hooks={"enabled": True, "blocked_tools": {"run_bash"}},
 )
 runtime = Runtime(settings)
-runtime.setup()
+# 在异步应用生命周期中调用 await runtime.setup() / await runtime.teardown()
 ```
 
-`api_key` 不传时由 `litellm` 自动从环境变量读取（`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 等）。
+### 3. 流式输出与 Session
 
-### 3. 流式输出 + 会话持久化
+在已有异步 Runtime 中：
 
 ```python
 session = runtime.create_session(title="演示会话")
-print("会话 ID:", session.metadata.id)
-
-# on_chunk 是每个文本 chunk 的回调，可直接接到 rich / websocket / SSE
 result = await runtime.run(
-    "读取 examples/minimal_repl.py 并解释。",
+    "解释 Python 装饰器",
     session=session,
     on_chunk=lambda delta: print(delta, end="", flush=True),
 )
-print("\nstop_reason =", result.stop_reason)
-runtime.save_session(session)
+print(result.stop_reason)
 ```
 
-第二次 `runtime.run(query, session=same_session)` 时，LLM 能看到上一轮的工具结果和对话历史。
+`on_chunk` 是普通**同步**回调，不是协程/异步生成器。persistent 会话执行后由 Runtime 尝试自动保存；文件采用原子替换，ephemeral 会话不落盘。
 
-### 4. 多 Session 并发（持久化 ↔ 临时）
+### 4. Session 与并发限制
 
 ```python
-# 持久化会话（写入 settings.session.dir）
-persistent = runtime.create_session(title="用户 A", mode="persistent")
-
-# 临时会话（不写盘、单次任务用完即弃）
-ephemeral = runtime.create_session(title="一次性任务", mode="ephemeral")
-
-# 启动后可用 runtime.load_session(id) / list_sessions() 找回
+persistent = runtime.create_session(title="长期对话", mode="persistent")
+ephemeral = runtime.create_session(title="临时任务", mode="ephemeral")
 ```
 
-### 5. 运行时人工介入（`steer` / `abort`）
+同一 Runtime 同时只允许一个 `run()`：多个请求应串行执行，或使用独立 Runtime；不同 Session 不意味着能在同一个 Runtime 并发运行。
+
+### 5. 运行期间 steer / abort
 
 ```python
 import asyncio
 
-task = asyncio.create_task(runtime.run("写一首关于秋天的短诗。"))
-await asyncio.sleep(1.0)
-
-runtime.steer("改成五言绝句。")   # turn 边界注入新用户输入
-# runtime.abort()                # 立即中止（工具会收到 cancel signal）
+task = asyncio.create_task(runtime.run("写一首关于秋天的短诗"))
+await asyncio.sleep(1)
+runtime.steer("改成五言绝句")  # 下一轮请求前注入
+# runtime.abort()             # 尝试中断当前流式等待/工具执行
 result = await task
 ```
 
+Abort 是协作式取消，无法回滚已发生的文件系统或外部操作。LLM 输出超过 `max_tokens` 时返回 `output_truncated`，不会误报 `completed`。
+
 ### 6. 自定义工具
 
-工具继承 `Tool`，参数用 Pydantic 定义 schema，LLM 通过 OpenAI function-calling 协议调用：
+使用 `Tool` + `@tool` 声明工具。以下为演示，不提供真实天气数据。
 
 ```python
+import asyncio
 from pydantic import BaseModel, Field
-from pyagent import tool, Tool, ToolResult, Runtime, Settings, load_settings
+from pyagent.config.loader import load_settings
+from pyagent.core.runtime import Runtime
+from pyagent.tools.base import Tool, ToolResult
+from pyagent.tools.decorators import tool
 
-class GetWeatherArgs(BaseModel):
-    city: str = Field(description="城市名，例如 '北京' / 'Beijing'")
+class WeatherArgs(BaseModel):
+    city: str = Field(description="城市名")
 
-@tool("get_weather", description="查询指定城市的当前天气")
-class GetWeatherTool(Tool):
-    parameters_model = GetWeatherArgs
+@tool("weather_demo", description="返回示例天气文本")
+class WeatherDemo(Tool):
+    parameters_model = WeatherArgs
 
-    async def execute(self, tool_call_id, args, signal, on_update):
-        city = args["city"]
-        # 这里调用真实 weather API
-        return ToolResult(content=f"{city} 晴，25°C")
+    async def execute(self, tool_call_id, args, signal=None, on_update=None):
+        return ToolResult(content=f"{args['city']}：这是占位信息，不是实时天气")
 
 async def main():
     runtime = Runtime(load_settings())
-    runtime.setup()
+    try:
+        await runtime.setup()
+        runtime.tool_registry.register(WeatherDemo())
+        result = await runtime.run("查询北京天气")
+        print(result.final_response)
+    finally:
+        await runtime.teardown()
 
-    # 注册自定义工具（同名覆盖；先注册再 run 才生效）
-    runtime.tool_registry.register(GetWeatherTool())
-
-    result = await runtime.run("北京今天天气怎么样？")
-    print(result.final_response)
-
-asyncio.run(main()) if False else None
+asyncio.run(main())
 ```
 
-工具放置约定：
-- 一次性/项目工具 → 直接 `runtime.tool_registry.register(...)`
-- 多项目复用 → 放到 `~/.pyagent/tools/*.py`，Runtime 启动时自动扫描
-
-工具自动可用以下能力（无需额外代码）：
-- BEFORE_TOOL / AFTER_TOOL 事件可改写 args（`event.payload["value"]`）
-- 长 result 自动截断
-- 重复工具调用守卫
-- 并行 / 串行批量执行（按 `execution_mode`）
+自定义工具也可以放在 `~/.pyagent/tools/*.py`，由自动发现加载。工具调用会通过 BEFORE_TOOL / AFTER_TOOL Hook；权限检查失败和 Abort 会阻止新工具执行，并维护消息配对。
 
 ### 7. 自定义 Skill
 
-Skill 是"注入到 system prompt 的 prompt 片段"，不会调用任何 LLM 工具，纯粹是知识/流程。典型用例：项目约定、安全约束、coding 风格指南。
+推荐在项目目录 `.pyagent/skills/code-review/SKILL.md` 编写：
 
-```python
-from pathlib import Path
-from pyagent.skills.types import Skill
-from pyagent import Runtime, Settings, load_settings
+```markdown
+---
+name: code-review
+description: 对代码进行审查并提出改进意见
+disable-model-invocation: false
+---
 
-# 方式 A：直接构造 Skill 对象
-custom_skill = Skill(
-    name="code_review",
-    description="对生成的代码进行自检清单",
-    body=(
-        "## Code Review Checklist\n"
-        "- 边界条件覆盖\n"
-        "- 错误处理完备\n"
-        "- 测试覆盖关键路径\n"
-    ),
-)
-runtime = Runtime(load_settings())
-runtime.setup()
-runtime.skill_manager.register(custom_skill)
-
-# 方式 B：把 SKILL.md 放到项目目录 .pyagent/skills/<name>/SKILL.md
-#      Runtime 启动时自动加载
-Path(".pyagent/skills/code_review/SKILL.md").write_text(
-    "---\n"
-    "name: code_review\n"
-    "description: 对生成的代码进行自检清单\n"
-    "---\n\n"
-    "## Code Review Checklist\n- 边界条件覆盖\n- 错误处理完备\n",
-    encoding="utf-8",
-)
+# 代码审查
+优先核查正确性、安全和边界条件。
 ```
 
-注册后，Skill 的 `name` / `description` 会出现在 system prompt 的"可用技能"清单中；LLM 可通过 `/skill:<name>` 显式触发加载技能 body 作为本轮额外上下文。
+`disable-model-invocation` 与 `disable_model_invocation` 都支持。同名技能按照 **project > user > builtin** 优先级选择。手动构造时 `Skill` 需要 `frontmatter=SkillFrontmatter(...)`、`body`、`file_path`、`base_dir` 字段。
 
 ### 8. 自定义 Hook
 
@@ -423,7 +389,7 @@ Hook 是事件总线，统一入口 `runtime.hooks.on(EventType.X, handler)`，h
 #### 8.1 简单观察
 
 ```python
-from pyagent import Event, EventType
+from pyagent.hooks.types import Event, EventType
 
 def on_before_llm(event: Event) -> None:
     print(f"[hook] BEFORE_LLM turn={event.get('turn')} msgs={event.get('message_count')}")
@@ -444,7 +410,7 @@ finally:
 Handler 返回非 `None` 的值，会替换当前值并继续派发；返回 `DispatchResult.value` 拿到最终值：
 
 ```python
-from pyagent import Event, EventType
+from pyagent.hooks.types import Event, EventType
 
 async def filter_dangerous_args(event: Event) -> dict | None:
     """若 LLM 想用 bash 执行 rm 命令，注入告警文本。"""
@@ -461,7 +427,7 @@ runtime.hooks.on(EventType.BEFORE_TOOL, filter_dangerous_args)
 Handler 返回 `HookControl(cancel=True)` 时，HookManager 会终止派发，且通过 `DispatchResult.cancelled` 把信号抛回 Runtime。
 
 ```python
-from pyagent import Event, EventType, HookControl
+from pyagent.hooks.types import Event, EventType, HookControl
 
 def block_bash(event: Event) -> HookControl | None:
     if event.get("tool_name") == "bash":
@@ -498,48 +464,44 @@ runtime.hooks.on(EventType.BEFORE_TOOL, block_bash)
 
 ### 9. 嵌入到 Web 服务 / 后台任务
 
-因为 `Runtime.run()` 是 `async` 方法，可以直接接到 FastAPI / Starlette / WebSocket / aiohttp：
+FastAPI 为可选依赖，以下示例使用 lifespan 管理异步资源。单个 Runtime 不能并发运行，为保证示例正确，使用 `asyncio.Lock` 串行化。
 
 ```python
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from pyagent import Settings, load_settings, Runtime
+from pyagent.config.loader import load_settings
+from pyagent.core.runtime import Runtime
 
-app = FastAPI()
 runtime = Runtime(load_settings())
-runtime.setup()  # Web 服务启动时一次 setup，进程级共享 Runtime
+run_lock = asyncio.Lock()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await runtime.setup()
+    try:
+        yield
+    finally:
+        await runtime.teardown()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/chat")
 async def chat(query: str, session_id: str | None = None):
-    session = runtime.load_session(session_id) if session_id else None
-    result = await runtime.run(query, session=session)
-    runtime.save_session(session)
+    async with run_lock:
+        session = (
+            runtime.load_session(session_id)
+            if session_id else runtime.create_session(title="API 对话")
+        )
+        result = await runtime.run(query, session=session)
     return {
         "reply": result.final_response,
-        "session_id": session.metadata.id if session else None,
+        "session_id": session.metadata.id,
         "stop_reason": result.stop_reason,
     }
 ```
 
-流式场景（SSE / WebSocket）：
-
-```python
-from fastapi.responses import StreamingResponse
-
-@app.post("/chat/stream")
-async def chat_stream(query: str, session_id: str | None = None):
-    session = runtime.load_session(session_id) if session_id else None
-
-    async def gen():
-        async def push(delta: str) -> None:
-            # SSE 风格：每个 chunk 一行 "data: {...}\n\n"
-            yield f"data: {delta}\n\n"
-
-        result = await runtime.run(query, session=session, on_chunk=push)
-        runtime.save_session(session)
-        yield f"event: done\ndata: {result.stop_reason}\n\n"
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-```
+SSE 等流式接口中，`on_chunk` 必须是同步函数。可用 `queue.put_nowait(delta)` 把 chunk 投递至 `asyncio.Queue`，再从异步生成器读取并输出；不能将含 `yield` 的 async generator 直接作为 `on_chunk`。客户端断开时，应调用 `runtime.abort()` 并回收请求任务。
 
 ### 10. 一次 `run()` 的完整流程
 
@@ -572,7 +534,7 @@ Runtime.run(query, session?, on_chunk?)
 | `success` | `bool` | 循环是否成功结束（`completed` / `terminated` 视为 True） |
 | `final_response` | `str` | LLM 最后一条纯文本；`terminated` 时为最后一个工具的 content |
 | `turns` | `int` | 实际循环轮次 |
-| `stop_reason` | `str` | `completed` / `terminated` / `cancelled` / `max_turns` / `agent_cancelled` / `permission_denied` / `llm_error` / `error` |
+| `stop_reason` | `str` | 包括 `completed`、`terminated`、`cancelled`、`max_turns`、`agent_cancelled`、`llm_cancelled`、`output_truncated`、`tool_error`、`permission_denied`、`llm_error`、`error` 等 |
 | `error` | `str` | 失败时的错误描述 |
 
 ## License

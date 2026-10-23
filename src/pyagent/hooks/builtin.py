@@ -34,6 +34,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from pyagent.hooks.types import Event, EventType
+from pyagent.llm.types import Usage
 from pyagent.tools.base import ToolResult
 
 if TYPE_CHECKING:
@@ -52,7 +53,11 @@ def setup_logging_hooks(hooks: HookManager, logger: logging.Logger) -> None:
         logger.debug("Agent 结束")
 
     async def on_before_tool(event: Event) -> None:
-        logger.debug(f"调用工具: {event.payload.get('tool_name')} 参数: {event.payload.get('args')}")
+        logger.debug(
+            "调用工具: %s 参数: %s",
+            event.payload.get("tool_name"),
+            event.payload.get("args"),
+        )
 
     async def on_after_tool(event: Event) -> None:
         is_error = event.payload.get("is_error", False)
@@ -101,7 +106,7 @@ def setup_usage_tracking_hook(
         session_getter: 返回当前 session 的无参 callable。
             必须在注册时延迟求值（每次 LLM 后取最新 session），
             而非捕获某个具体 Session 实例（Runtime 每次 run 都会切换 session）。
-        loop: AgentLoop对象，当LLM调用后若返回了具体的usage则更新当前上下文为此精确值。
+        loop: AgentLoop 对象，记录本次请求的输入 token 作为上下文占用量。
     """
 
     async def on_after_llm(event: Event) -> None:
@@ -113,7 +118,12 @@ def setup_usage_tracking_hook(
         output_tokens = int(usage.get("output_tokens") or 0)
         if input_tokens or output_tokens:
             session.add_usage(input_tokens, output_tokens)
-            loop.context_usage._used = input_tokens + output_tokens
+            # output_tokens 属于本次生成量，不应被计入请求的输入上下文。
+            # 使用公开 update() 接口，避免直接写入 ContextUsage 的私有字段。
+            if input_tokens > 0 and loop.context_usage is not None:
+                loop.context_usage.update(
+                    [], last_usage=Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+                )
 
     hooks.on(EventType.AFTER_LLM, on_after_llm)
 
@@ -233,12 +243,15 @@ def setup_tool_result_truncation_hook(
         head = result.content[:half]
         tail = result.content[-half:]
         truncated = (
-            f"{head}\n\n... [内容已截断，共 {len(result.content)} 字符，仅保留前 {half} 与后 {half} 字符] ...\n\n{tail}"
+            f"{head}\n\n"
+            f"... [内容已截断，共 {len(result.content)} 字符，"
+            f"仅保留前 {half} 与后 {half} 字符] ...\n\n{tail}"
         )
         # 构造新的 ToolResult 替换原对象，保持 details 透传
         return ToolResult(
             content=truncated,
             is_error=result.is_error,
+            terminate=result.terminate,
             details={
                 **(result.details or {}),
                 "truncated": True,

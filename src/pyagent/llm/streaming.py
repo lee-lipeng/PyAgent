@@ -48,7 +48,9 @@ class StreamAggregator:
                 # 用 index 作为 key（OpenAI 流式格式中同一工具调用的
                 # 所有片段共享同一 index，id 只在第一个片段出现）
                 key = str(tc.index)
-                builder = self._tool_call_builders.setdefault(key, {"id": "", "name": "", "raw_parts": []})
+                builder = self._tool_call_builders.setdefault(
+                    key, {"id": "", "name": "", "raw_parts": []}
+                )
                 # id 只在第一个片段出现，后续片段 id 为空
                 if tc.id:
                     builder["id"] = tc.id
@@ -76,9 +78,13 @@ class StreamAggregator:
             if raw:
                 try:
                     parsed = json.loads(raw)
-                    arguments = parsed if isinstance(parsed, dict) else {}
-                except json.JSONDecodeError:
-                    logger.warning("工具调用参数 JSON 解析失败: %s", raw[:200])
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"工具 {b['name']} 的调用参数不是有效 JSON"
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"工具 {b['name']} 的调用参数必须是 JSON 对象")
+                arguments = parsed
             elif "arguments" in b:
                 arguments = b["arguments"]
             # 兜底：某些 provider 可能不返回 id，生成唯一 id 避免重复

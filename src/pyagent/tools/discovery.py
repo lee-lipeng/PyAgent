@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-import importlib
+import hashlib
 import inspect
 from typing import TYPE_CHECKING
 
@@ -41,17 +41,14 @@ class ToolDiscovery(DiscoveryBase):
         if item.path.name == "__init__.py" or item.path.stem.startswith("_"):
             return DiscoveryResult(loaded=False, skipped=True)
 
-        # 动态导入模块
-        module_name = f"_pyagent_tool_{item.name}"
+        # 不同目录可能包含同名文件；固定模块名会误用 sys.modules 中的旧文件。
+        unique_name = hashlib.sha256(str(item.path.resolve()).encode("utf-8")).hexdigest()[:16]
+        module_name = f"_pyagent_tool_{unique_name}"
         try:
-            module = importlib.import_module(module_name)
-        except Exception:
-            # import_module 失败，尝试从路径加载
-            try:
-                module = import_module_from_path(item.path, module_name)
-            except Exception as exc:
-                logger.warning(f"加载工具文件{item.path}失败:{exc}")
-                return DiscoveryResult(loaded=False, skipped=True)
+            module = import_module_from_path(item.path, module_name)
+        except Exception as exc:
+            logger.warning("加载工具文件 %s 失败: %s", item.path, exc)
+            return DiscoveryResult(loaded=False, skipped=True)
 
         # 扫描模块中所有 @tool 装饰的类
         loaded_count = 0

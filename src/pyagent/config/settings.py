@@ -96,6 +96,17 @@ class HooksSettings(BaseModel):
     enable_auto_save: bool = True
 
 
+def merge_settings_dicts(base: dict, overrides: dict) -> dict:
+    """递归合并配置，后一个来源的字段覆盖前一个来源。"""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_settings_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class Settings(BaseSettings):
     """PyAgent 全局配置。
 
@@ -122,6 +133,12 @@ class Settings(BaseSettings):
     enable_builtin_skills: bool = True
 
     @classmethod
+    def from_data(cls, data: dict) -> Settings:
+        """将环境变量覆盖到文件配置之上，保留嵌套字段合并语义。"""
+        env_overrides = cls().model_dump(exclude_unset=True)
+        return cls.model_validate(merge_settings_dicts(data, env_overrides))
+
+    @classmethod
     def load(cls, config_path: Path | None = None) -> Settings:
         """从 JSON 文件加载配置，再叠加环境变量。
 
@@ -134,4 +151,4 @@ class Settings(BaseSettings):
         if config_path and config_path.exists():
             data = json.loads(config_path.read_text(encoding="utf-8"))
 
-        return cls(**data)
+        return cls.from_data(data)

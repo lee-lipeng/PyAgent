@@ -17,6 +17,7 @@ Runtime 是用户面对的入口，用户通过 Runtime 使用 Agent。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -53,8 +54,11 @@ class Runtime:
     用法::
 
         runtime = Runtime(settings)
-        runtime.setup()  # 组装组件、发现工具和技能
-        result = await runtime.run("帮我写个函数")
+        await runtime.setup()  # 组装组件、发现工具和技能
+        try:
+            result = await runtime.run("帮我写个函数")
+        finally:
+            await runtime.teardown()
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -73,6 +77,9 @@ class Runtime:
         self._current_ctx: RuntimeContext | None = None
         # 是否正在运行 Agent 循环
         self._is_running = False
+        self._run_lock = asyncio.Lock()
+        # 自动连接浏览器的后台任务由 Runtime 持有，teardown 时统一取消。
+        self._browser_start_task: asyncio.Task[None] | None = None
         # DuplicateGuard 的 reset 闭包（per-Runtime，复用无需每次注册）
         self._duplicate_guard_reset: Callable[[], None] | None = None
 
@@ -101,6 +108,8 @@ class Runtime:
             api_key=llm_cfg.api_key,
             base_url=llm_cfg.base_url,
             timeout=llm_cfg.timeout,
+            temperature=llm_cfg.temperature,
+            max_tokens=llm_cfg.max_tokens,
         )
 
         # 2. 工具系统
@@ -200,16 +209,28 @@ class Runtime:
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("自动启动 Chrome 失败 (非致命): %s", exc)
 
-        asyncio.create_task(_background_start())
+        task = self._browser_start_task
+        if task is None or task.done():
+            self._browser_start_task = asyncio.create_task(_background_start())
 
     async def _close_browser_bridge(self) -> None:
-        """关闭浏览器桥 (Runtime teardown 时调用)。"""
+        """先终止后台连接任务，再关闭浏览器桥，避免资源释放竞态。"""
+        task = self._browser_start_task
+        self._browser_start_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            except Exception:
+                logger.exception("浏览器桥后台任务退出异常")
+
         try:
             from pyagent.tools.browser import close_bridge
 
             await close_bridge()
         except Exception as exc:
-            logger.warning(f"关闭浏览器桥失败: {exc}", )
+            logger.warning("关闭浏览器桥失败: %s", exc)
 
     def _setup_logging(self) -> None:
         """配置日志级别和文件日志。"""
@@ -318,7 +339,7 @@ class Runtime:
 
         # 内置工具
         builtin_dir = Path(__file__).parent.parent / "tools" / "builtin"
-        if builtin_dir.exists():
+        if self.settings.enable_builtin_tools and builtin_dir.exists():
             for py_file in builtin_dir.glob("*.py"):
                 if py_file.name == "__init__.py" or py_file.stem.startswith("_"):
                     continue
@@ -372,7 +393,7 @@ class Runtime:
 
         # 内置技能
         builtin_dir = Path(__file__).parent.parent / "skills" / "builtin"
-        if builtin_dir.exists():
+        if self.settings.enable_builtin_skills and builtin_dir.exists():
             search_dirs.append((builtin_dir, "builtin"))
 
         # 用户技能
@@ -386,7 +407,9 @@ class Runtime:
             search_dirs.append((project_skills_dir, "project"))
 
         # 扫描并加载
-        skills, diagnostics = discovery.discover(search_dirs)
+        # SkillDiscovery 保留首个同名技能，因此先扫描高优先级来源。
+        # project > user > builtin，和配置文件的覆盖优先级一致。
+        skills, diagnostics = discovery.discover(list(reversed(search_dirs)))
 
         # 注册到 manager（同名冲突由 manager.register 处理）
         for skill in skills:
@@ -397,6 +420,18 @@ class Runtime:
             logger.warning("技能诊断 [%s]: %s (%s)", diag.code, diag.message, diag.path)
 
     async def run(
+        self,
+        query: str,
+        session: Session | None = None,
+        on_chunk: Any | None = None,
+    ) -> LoopResult:
+        """执行任务；当前 Runtime 不允许并发复用全局运行状态。"""
+        if self._run_lock.locked():
+            raise RuntimeError("Runtime 不支持并发 run()，请为并行任务创建独立 Runtime")
+        async with self._run_lock:
+            return await self._run_once(query, session, on_chunk)
+
+    async def _run_once(
         self,
         query: str,
         session: Session | None = None,
@@ -430,35 +465,38 @@ class Runtime:
         self._current_ctx = ctx
         self._is_running = True
 
-        start_event = self._make_event("agent_start", query=query)
-        start_result = await self.hooks.dispatch(start_event)
-        if start_result.cancelled:
-            self._is_running = False
-            self._current_ctx = None
-            return LoopResult(
-                success=False,
-                stop_reason="agent_cancelled",
-                error=start_result.cancel_reason or "Agent 启动被 Hook 取消",
-            )
-
         result: LoopResult | None = None
         try:
-            result = await self.loop.run(query, session, on_chunk, ctx=ctx)
-        finally:
-            await self.hooks.dispatch(
-                self._make_event(
-                    "agent_end",
-                    stop_reason=(result.stop_reason if result is not None else "error"),
+            start_event = self._make_event("agent_start", query=query)
+            start_result = await self.hooks.dispatch(start_event)
+            if start_result.cancelled:
+                result = LoopResult(
+                    success=False,
+                    stop_reason="agent_cancelled",
+                    error=start_result.cancel_reason or "Agent 启动被 Hook 取消",
                 )
-            )
-            try:
-                self.save_session(session)
-            except Exception as exc:
-                logger.warning("自动保存会话失败: %s", exc)
-            self._is_running = False
-            self._current_ctx = None
+                return result
 
-        return result
+            result = await self.loop.run(query, session, on_chunk, ctx=ctx)
+            return result
+        finally:
+            # 即使启动/结束 Hook 异常，也必须释放 Runtime 的运行状态。
+            try:
+                await self.hooks.dispatch(
+                    self._make_event(
+                        "agent_end",
+                        stop_reason=result.stop_reason if result is not None else "error",
+                    )
+                )
+            except Exception:
+                logger.exception("Agent 结束 Hook 执行失败")
+            finally:
+                try:
+                    self.save_session(session)
+                except Exception as exc:
+                    logger.warning("自动保存会话失败: %s", exc)
+                self._is_running = False
+                self._current_ctx = None
 
     def steer(self, text: str) -> bool:
         """在 Agent 运行期间注入改向输入。
