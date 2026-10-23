@@ -92,7 +92,10 @@ class EditFileTool(Tool):
             )
         if occurrences > 1:
             return ToolResult(
-                content=f"old_string 在文件中出现 {occurrences} 次，无法唯一定位。请提供更多上下文使其唯一。",
+                content=(
+                    f"old_string 在文件中出现 {occurrences} 次，无法唯一定位。"
+                    "请提供更多上下文使其唯一。"
+                ),
                 is_error=True,
                 details={
                     "error": "string_not_unique",
