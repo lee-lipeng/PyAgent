@@ -29,6 +29,11 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Run tests
         run: uv run --no-sync pytest -q
+      - name: Check browser extension JS syntax
+        run: |
+          node --check src/pyagent/tools/browser/extension/background.js
+          node --check src/pyagent/tools/browser/extension/content.js
+          node --check src/pyagent/tools/browser/extension/screenshot_main.js
       - name: Lint changed core modules
         run: >-
           uv run --no-sync ruff check

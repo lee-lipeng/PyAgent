@@ -54,8 +54,11 @@ class Runtime:
     用法::
 
         runtime = Runtime(settings)
-        runtime.setup()  # 组装组件、发现工具和技能
-        result = await runtime.run("帮我写个函数")
+        await runtime.setup()  # 组装组件、发现工具和技能
+        try:
+            result = await runtime.run("帮我写个函数")
+        finally:
+            await runtime.teardown()
     """
 
     def __init__(self, settings: Settings) -> None:

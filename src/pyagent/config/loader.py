@@ -1,7 +1,7 @@
 """多级配置加载器。
 
-按优先级搜索配置文件，找到第一个存在的就加载。
-搜索顺序（从低到高）：
+将存在的多份配置文件按字段递归合并，再叠加环境变量。
+优先级（从低到高）：
     1. ~/.pyagent/settings.json  （用户全局）
     2. .pyagent/settings.json     （项目本地）
 """
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 def find_config_file(cwd: Path | None = None) -> Path | None:
-    """按优先级搜索配置文件，返回第一个找到的路径。"""
+    """按项目级优先顺序查找配置路径（仅用于定位，不负责合并）。"""
     candidates = [
         get_project_config_dir(cwd) / "settings.json",
         get_user_config_dir() / "settings.json",
