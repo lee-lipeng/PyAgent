@@ -158,35 +158,41 @@ class CompactionManager:
             保留段为 messages[cut:]。
         """
         total = len(messages)
-        # 理想切割点：total - retained_tail
-        ideal_cut = max(1, total - self._retained_tail)
+        ideal_cut = max(0, total - self._retained_tail)
+        pending: set[str] = set()
+        safe_cut = 0
 
-        # 向前寻找安全切割点（避免切断 tool_call ↔ tool_result）
-        cut = ideal_cut
-        while cut > 1:
-            # 检查 cut 位置是否安全：messages[cut-1] 不应是 assistant（带 tool_calls）
-            # 因为 assistant 的 tool_calls 需要紧跟着 tool 结果
-            prev_msg = messages[cut - 1]
-            prev_role = prev_msg.get("role", "")
-            prev_has_tool_calls = bool(prev_msg.get("tool_calls"))
+        # 仅在整个工具批次结果齐全时允许切割，避免并行调用结果被拆分。
+        for index, msg in enumerate(messages[:ideal_cut]):
+            if msg.get("role") == "assistant":
+                pending.update(
+                    tc["id"] for tc in msg.get("tool_calls", []) if tc.get("id")
+                )
+            elif msg.get("role") == "tool":
+                pending.discard(msg.get("tool_call_id"))
 
-            if prev_role == "assistant" and prev_has_tool_calls:
-                # assistant 带 tool_calls，需要把 tool_results 也包含在被压缩段
-                # 向前移动切割点
-                cut -= 1
-                continue
+            next_index = index + 1
+            if not pending and (
+                next_index == total or messages[next_index].get("role") != "tool"
+            ):
+                safe_cut = next_index
 
-            # 检查 cut 位置是否是 tool 结果的结尾
-            # 如果 messages[cut] 是 tool，说明前面有 assistant(tool_calls) 被切断
-            if cut < total and messages[cut].get("role") == "tool":
-                # 向前找到 assistant(tool_calls) 之前
-                cut -= 1
-                continue
+        return safe_cut
 
-            # 安全切割点
-            break
-
-        return cut
+    @staticmethod
+    def _is_safe_cut(messages: list[dict[str, Any]], cut: int) -> bool:
+        """验证自定义切割点不拆分工具调用批次。"""
+        if not 1 <= cut < len(messages) or messages[cut].get("role") == "tool":
+            return False
+        pending: set[str] = set()
+        for msg in messages[:cut]:
+            if msg.get("role") == "assistant":
+                pending.update(
+                    tc["id"] for tc in msg.get("tool_calls", []) if tc.get("id")
+                )
+            elif msg.get("role") == "tool":
+                pending.discard(msg.get("tool_call_id"))
+        return not pending
 
     @staticmethod
     def _render_user_prompt(
@@ -199,8 +205,18 @@ class CompactionManager:
             prompt_content += f"[已有摘要]\n{previous_summary}\n\n[新增对话]\n"
         for msg in messages:
             role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            prompt_content += f"[{role}] {content}\n"
+            content = msg.get("content") or ""
+            if role == "tool" and len(content) > 2000:
+                content = f"{content[:1000]}\n...[工具输出已截断]...\n{content[-1000:]}"
+            name = msg.get("name", "")
+            label = f"{role}:{name}" if name else role
+            prompt_content += f"[{label}] {content}\n"
+            for call in msg.get("tool_calls") or []:
+                function = call.get("function") or {}
+                prompt_content += (
+                    f"[tool_call id={call.get('id', '')}] "
+                    f"{function.get('name', '')}({function.get('arguments', '')})\n"
+                )
         return prompt_content
 
     def prepare_compaction(
@@ -351,7 +367,15 @@ class CompactionManager:
 
             overrides = dispatch_result.value or {}
             if overrides.get("cut_point") is not None:
-                cut = overrides["cut_point"]
+                proposed_cut = overrides["cut_point"]
+                if type(proposed_cut) is not int or not self._is_safe_cut(
+                    messages, proposed_cut
+                ):
+                    return CompactionResult(
+                        success=False,
+                        error="Hook 提供的切割点无效或会拆分工具调用批次",
+                    )
+                cut = proposed_cut
                 compacted = messages[:cut]
                 retained = messages[cut:]
             if overrides.get("previous_summary"):

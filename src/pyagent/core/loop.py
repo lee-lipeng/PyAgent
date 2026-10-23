@@ -94,18 +94,16 @@ class AgentLoop:
 
         从 Agent 的系统提示词和会话的上下文窗口配置创建 ContextBuilder。
         """
-        if self._context_builder is None:
-            system_prompt = self.agent.build_system_prompt()
-            context_window = session.metadata.context_window
-            threshold = session.metadata.compaction_threshold
-            self.context_usage = ContextUsage(
-                limit=context_window or 128000,
-                threshold=threshold,
-            )
-            self._context_builder = ContextBuilder(
-                system_prompt=system_prompt,
-                context_usage=self.context_usage,
-            )
+        # 不同任务的系统提示词及 token 预算必须相互隔离。
+        system_prompt = self.agent.build_system_prompt(session.metadata.system_prompt or None)
+        self.context_usage = ContextUsage(
+            limit=session.metadata.context_window or 128000,
+            threshold=session.metadata.compaction_threshold,
+        )
+        self._context_builder = ContextBuilder(
+            system_prompt=system_prompt,
+            context_usage=self.context_usage,
+        )
         return self._context_builder
 
     async def run(
@@ -144,7 +142,6 @@ class AgentLoop:
 
         turns = 0
         final_response = ""
-        last_usage = None
 
         try:
             while turns < self.agent.max_turns:
@@ -160,7 +157,20 @@ class AgentLoop:
 
                 turns += 1
 
-                messages = builder.build(session, last_usage)
+                messages = builder.build(session)
+
+                # 仅在工具批次结果全部写入 Session 后、下一次 LLM 请求前压缩，
+                # 避免压缩过程截断 assistant(tool_calls) 与 tool_result 的配对关系。
+                if (
+                    self._compaction is not None
+                    and self.context_usage is not None
+                    and self._compaction.should_compact(messages, self.context_usage)
+                ):
+                    compacted = await self._compaction.compact_session(
+                        session, self.context_usage, force=False
+                    )
+                    if compacted.success:
+                        messages = builder.build(session)
 
                 # 单一 dispatch：handler 可取消（return HookControl）或链式修改 messages
                 llm_pre = await self.agent.dispatch(
@@ -203,9 +213,6 @@ class AgentLoop:
                         error=str(exc),
                     )
 
-                # 更新 usage
-                last_usage = response.usage
-
                 response = (
                     await self.agent.dispatch(
                         EventType.AFTER_LLM,
@@ -242,24 +249,6 @@ class AgentLoop:
                     )
                 )
 
-                # 上下文压缩
-                if (
-                    self._compaction is not None
-                    and self.context_usage is not None
-                    and (self.context_usage.is_threshold_reached or self.context_usage.is_overflow)
-                ):
-                    logger.info(
-                        "触发上下文压缩: used=%s, limit=%s",
-                        self.context_usage.used,
-                        self.context_usage.limit,
-                    )
-
-                    await self._compaction.compact_session(
-                        session,
-                        self.context_usage,
-                        force=True,
-                    )
-
                 # 检查是否有工具调用
                 if not response.has_tool_calls:
                     # 无工具调用，准备结束循环
@@ -294,6 +283,15 @@ class AgentLoop:
                         count=len(tool_calls),
                     )
                     if batch_pre.cancelled:
+                        # assistant 消息已经记录，需补齐全部工具结果以维持会话有效性。
+                        for tc in response.tool_calls:
+                            session.add_message(
+                                ToolResultMessage(
+                                    content=batch_pre.cancel_reason or "工具批次被取消",
+                                    tool_call_id=tc.id,
+                                    name=tc.name,
+                                )
+                            )
                         return LoopResult(
                             success=False,
                             turns=turns,

@@ -73,6 +73,7 @@ class Runtime:
         self._current_ctx: RuntimeContext | None = None
         # 是否正在运行 Agent 循环
         self._is_running = False
+        self._run_lock = asyncio.Lock()
         # DuplicateGuard 的 reset 闭包（per-Runtime，复用无需每次注册）
         self._duplicate_guard_reset: Callable[[], None] | None = None
 
@@ -318,7 +319,7 @@ class Runtime:
 
         # 内置工具
         builtin_dir = Path(__file__).parent.parent / "tools" / "builtin"
-        if builtin_dir.exists():
+        if self.settings.enable_builtin_tools and builtin_dir.exists():
             for py_file in builtin_dir.glob("*.py"):
                 if py_file.name == "__init__.py" or py_file.stem.startswith("_"):
                     continue
@@ -372,7 +373,7 @@ class Runtime:
 
         # 内置技能
         builtin_dir = Path(__file__).parent.parent / "skills" / "builtin"
-        if builtin_dir.exists():
+        if self.settings.enable_builtin_skills and builtin_dir.exists():
             search_dirs.append((builtin_dir, "builtin"))
 
         # 用户技能
@@ -397,6 +398,18 @@ class Runtime:
             logger.warning("技能诊断 [%s]: %s (%s)", diag.code, diag.message, diag.path)
 
     async def run(
+        self,
+        query: str,
+        session: Session | None = None,
+        on_chunk: Any | None = None,
+    ) -> LoopResult:
+        """执行任务；当前 Runtime 不允许并发复用全局运行状态。"""
+        if self._run_lock.locked():
+            raise RuntimeError("Runtime 不支持并发 run()，请为并行任务创建独立 Runtime")
+        async with self._run_lock:
+            return await self._run_once(query, session, on_chunk)
+
+    async def _run_once(
         self,
         query: str,
         session: Session | None = None,

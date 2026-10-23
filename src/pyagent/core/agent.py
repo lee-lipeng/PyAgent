@@ -56,7 +56,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_turns = max_turns
 
-    def build_system_prompt(self) -> str:
+    def build_system_prompt(self, base_prompt: str | None = None) -> str:
         """构建完整系统提示词。
 
         基础 system_prompt + 技能列表（XML 块，仅 name/description/file_path）。
@@ -65,7 +65,8 @@ class Agent:
         - system prompt 只注入技能描述，不注入完整正文
         - LLM 读 description 自行判断是否用 read_file 加载 SKILL.md
         """
-        parts = [self.system_prompt] if self.system_prompt else []
+        prompt = self.system_prompt if base_prompt is None else base_prompt
+        parts = [prompt] if prompt else []
 
         # 注入技能列表（仅 name/description/file_path）
         skill_block = self.skill_manager.format_for_system_prompt()
