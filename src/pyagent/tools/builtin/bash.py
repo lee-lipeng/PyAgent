@@ -41,7 +41,19 @@ class RunBashTool(Tool):
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal_module.SIGKILL)
         elif proc.returncode is None:
-            proc.kill()
+            # Windows: 同时结束 cmd.exe 与子进程树，避免只杀 shell 留下后台任务。
+            try:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(proc.pid),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=5)
+            except (OSError, TimeoutError):
+                pass
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
         if proc.returncode is None:
             await proc.wait()
 
