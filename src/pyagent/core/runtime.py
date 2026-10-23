@@ -102,6 +102,8 @@ class Runtime:
             api_key=llm_cfg.api_key,
             base_url=llm_cfg.base_url,
             timeout=llm_cfg.timeout,
+            temperature=llm_cfg.temperature,
+            max_tokens=llm_cfg.max_tokens,
         )
 
         # 2. 工具系统
@@ -443,35 +445,38 @@ class Runtime:
         self._current_ctx = ctx
         self._is_running = True
 
-        start_event = self._make_event("agent_start", query=query)
-        start_result = await self.hooks.dispatch(start_event)
-        if start_result.cancelled:
-            self._is_running = False
-            self._current_ctx = None
-            return LoopResult(
-                success=False,
-                stop_reason="agent_cancelled",
-                error=start_result.cancel_reason or "Agent 启动被 Hook 取消",
-            )
-
         result: LoopResult | None = None
         try:
-            result = await self.loop.run(query, session, on_chunk, ctx=ctx)
-        finally:
-            await self.hooks.dispatch(
-                self._make_event(
-                    "agent_end",
-                    stop_reason=(result.stop_reason if result is not None else "error"),
+            start_event = self._make_event("agent_start", query=query)
+            start_result = await self.hooks.dispatch(start_event)
+            if start_result.cancelled:
+                result = LoopResult(
+                    success=False,
+                    stop_reason="agent_cancelled",
+                    error=start_result.cancel_reason or "Agent 启动被 Hook 取消",
                 )
-            )
-            try:
-                self.save_session(session)
-            except Exception as exc:
-                logger.warning("自动保存会话失败: %s", exc)
-            self._is_running = False
-            self._current_ctx = None
+                return result
 
-        return result
+            result = await self.loop.run(query, session, on_chunk, ctx=ctx)
+            return result
+        finally:
+            # 即使启动/结束 Hook 异常，也必须释放 Runtime 的运行状态。
+            try:
+                await self.hooks.dispatch(
+                    self._make_event(
+                        "agent_end",
+                        stop_reason=result.stop_reason if result is not None else "error",
+                    )
+                )
+            except Exception:
+                logger.exception("Agent 结束 Hook 执行失败")
+            finally:
+                try:
+                    self.save_session(session)
+                except Exception as exc:
+                    logger.warning("自动保存会话失败: %s", exc)
+                self._is_running = False
+                self._current_ctx = None
 
     def steer(self, text: str) -> bool:
         """在 Agent 运行期间注入改向输入。

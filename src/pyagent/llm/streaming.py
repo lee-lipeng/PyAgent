@@ -76,9 +76,13 @@ class StreamAggregator:
             if raw:
                 try:
                     parsed = json.loads(raw)
-                    arguments = parsed if isinstance(parsed, dict) else {}
-                except json.JSONDecodeError:
-                    logger.warning("工具调用参数 JSON 解析失败: %s", raw[:200])
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"工具 {b['name']} 的调用参数不是有效 JSON"
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"工具 {b['name']} 的调用参数必须是 JSON 对象")
+                arguments = parsed
             elif "arguments" in b:
                 arguments = b["arguments"]
             # 兜底：某些 provider 可能不返回 id，生成唯一 id 避免重复
