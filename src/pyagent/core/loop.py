@@ -199,12 +199,12 @@ class AgentLoop:
                         tools=tools if tools else None,
                     )
                     # 并行监听用户 Abort；不能依赖服务端继续推送下一个 chunk。
-                    async def consume_stream() -> None:
-                        async for chunk in chunks:
+                    async def consume_stream(stream: Any) -> None:
+                        async for chunk in stream:
                             if chunk.delta and on_chunk:
                                 on_chunk(chunk.delta)
 
-                    stream_task = asyncio.create_task(consume_stream())
+                    stream_task = asyncio.create_task(consume_stream(chunks))
                     abort_task = asyncio.create_task(ctx.cancel_signal.wait())
                     try:
                         done, _ = await asyncio.wait(
