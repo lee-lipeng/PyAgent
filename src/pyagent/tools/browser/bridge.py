@@ -295,6 +295,7 @@ class BrowserBridge:
     async def _on_client_connect(self, ws: Any) -> None:
         """新客户端连接 — 注册并启动该连接的 recv loop。"""
         peer = "unknown"
+        clean_close = True
         try:
             with contextlib.suppress(Exception):
                 peer = f"{ws.remote_address[0]}:{ws.remote_address[1]}"
@@ -319,7 +320,6 @@ class BrowserBridge:
             logger.info(f"新 WS 客户端连入:{peer} (role=unknown)")
             self._ws_clients.add(ws)
             logger.info(f"浏览器扩展已注册 (当前{len(self._ws_clients)}个客户端) — 等扩展发 ready/tabs_update...")
-            clean_close = True  # 默认正常关闭;ConnectionClosed 异常路径置 False
             try:
                 async for msg in ws:
                     clean_close = False
