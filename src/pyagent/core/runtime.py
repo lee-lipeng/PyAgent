@@ -17,6 +17,7 @@ Runtime 是用户面对的入口，用户通过 Runtime 使用 Agent。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,8 @@ class Runtime:
         # 是否正在运行 Agent 循环
         self._is_running = False
         self._run_lock = asyncio.Lock()
+        # 自动连接浏览器的后台任务由 Runtime 持有，teardown 时统一取消。
+        self._browser_start_task: asyncio.Task[None] | None = None
         # DuplicateGuard 的 reset 闭包（per-Runtime，复用无需每次注册）
         self._duplicate_guard_reset: Callable[[], None] | None = None
 
@@ -203,16 +206,28 @@ class Runtime:
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("自动启动 Chrome 失败 (非致命): %s", exc)
 
-        asyncio.create_task(_background_start())
+        task = self._browser_start_task
+        if task is None or task.done():
+            self._browser_start_task = asyncio.create_task(_background_start())
 
     async def _close_browser_bridge(self) -> None:
-        """关闭浏览器桥 (Runtime teardown 时调用)。"""
+        """先终止后台连接任务，再关闭浏览器桥，避免资源释放竞态。"""
+        task = self._browser_start_task
+        self._browser_start_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            except Exception:
+                logger.exception("浏览器桥后台任务退出异常")
+
         try:
             from pyagent.tools.browser import close_bridge
 
             await close_bridge()
         except Exception as exc:
-            logger.warning(f"关闭浏览器桥失败: {exc}", )
+            logger.warning("关闭浏览器桥失败: %s", exc)
 
     def _setup_logging(self) -> None:
         """配置日志级别和文件日志。"""
