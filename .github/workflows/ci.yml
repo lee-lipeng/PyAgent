@@ -37,6 +37,8 @@ jobs:
           src/pyagent/session/store.py
           src/pyagent/tools/schema.py
           src/pyagent/tools/executor.py
+          src/pyagent/tools/discovery.py
+          src/pyagent/utils/loader.py
           src/pyagent/tools/builtin/bash.py
           src/pyagent/llm/client.py
           src/pyagent/llm/streaming.py

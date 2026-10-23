@@ -46,6 +46,9 @@ def import_module_from_path(path: Path, module_name: str | None = None) -> Modul
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
+        # 导入失败后不要保留半初始化的 sys.modules 条目。
+        if sys.modules.get(module_name) is module:
+            sys.modules.pop(module_name, None)
         logger.error("动态导入模块失败: %s — %s", path, exc)
         raise ImportError(f"模块执行失败: {path}") from exc
 

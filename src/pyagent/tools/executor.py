@@ -80,11 +80,16 @@ class ToolExecutor:
         if force_sequential:
             results = [await self._exec_one(tc, signal) for tc in tool_calls]
         else:
-            results = await asyncio.gather(
-                *[self._exec_one(tc, signal) for tc in tool_calls],
-                return_exceptions=False,
-            )
-            results = list(results)
+            tasks = [asyncio.create_task(self._exec_one(tc, signal)) for tc in tool_calls]
+            try:
+                results = list(await asyncio.gather(*tasks))
+            except BaseException:
+                # gather 在一个任务异常时不会自动取消其他任务。
+                # 必须回收整批任务，避免 Agent 返回后仍执行写文件等副作用。
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         return results
 

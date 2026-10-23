@@ -251,15 +251,21 @@ class AgentLoop:
                         error=str(exc),
                     )
 
-                response = (
-                    await self.agent.dispatch(
-                        EventType.AFTER_LLM,
-                        initial=response,
-                        turn=turns,
-                        has_tool_calls=response.has_tool_calls,
-                        usage=response.usage.model_dump() if response.usage else {},
+                llm_post = await self.agent.dispatch(
+                    EventType.AFTER_LLM,
+                    initial=response,
+                    turn=turns,
+                    has_tool_calls=response.has_tool_calls,
+                    usage=response.usage.model_dump() if response.usage else {},
+                )
+                if llm_post.cancelled:
+                    return LoopResult(
+                        success=False,
+                        turns=turns,
+                        stop_reason="llm_cancelled",
+                        error=llm_post.cancel_reason,
                     )
-                ).value
+                response = llm_post.value
 
                 # 构造 assistant 消息
                 assistant_msg: dict[str, Any] = {"role": "assistant"}
@@ -291,8 +297,16 @@ class AgentLoop:
 
                 # 检查是否有工具调用
                 if not response.has_tool_calls:
-                    # 无工具调用，准备结束循环
+                    # 输出长度耗尽不代表自然结束，不能误报为成功。
                     final_response = response.content or ""
+                    if response.stop_reason == "length":
+                        return LoopResult(
+                            success=False,
+                            final_response=final_response,
+                            turns=turns,
+                            stop_reason="output_truncated",
+                            error="模型达到最大输出 Token 限制，响应可能不完整",
+                        )
 
                     # 如果 steering 队列有内容，继续执行
                     if ctx.has_steering():
@@ -414,6 +428,25 @@ class AgentLoop:
                         success=False,
                         turns=turns,
                         stop_reason="permission_denied",
+                        error=str(exc),
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    # 任何工具批次异常都要为已写入的 assistant 调用补齐结果。
+                    # 取消异常保留协程的取消语义，由 Runtime 最终保存 Session。
+                    for item in assistant_msg["tool_calls"]:
+                        session.add_message(
+                            ToolResultMessage(
+                                content=f"工具批次未完成: {exc or type(exc).__name__}",
+                                tool_call_id=item["id"],
+                                name=item["function"]["name"],
+                            )
+                        )
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return LoopResult(
+                        success=False,
+                        turns=turns,
+                        stop_reason="tool_error",
                         error=str(exc),
                     )
 
