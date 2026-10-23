@@ -44,6 +44,7 @@ jobs:
           src/pyagent/cli/app.py
           src/pyagent/tools/builtin/write.py
           src/pyagent/tools/builtin/edit.py
+          src/pyagent/skills/loader.py
           src/pyagent/tools/builtin/bash.py
           src/pyagent/llm/client.py
           src/pyagent/llm/streaming.py

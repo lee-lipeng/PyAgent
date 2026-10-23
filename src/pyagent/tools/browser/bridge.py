@@ -494,8 +494,10 @@ class BrowserBridge:
         让扩展端 runCodeOnTab 自己挑当前 active http/https tab 或新开一个。
         这样 LLM 调 navigate 不会因为"服务端没 tab 缓存"就失败。
         """
-        if tab_id and tab_id in self._tabs:
-            return tab_id
+        if tab_id is not None:
+            if tab_id in self._tabs:
+                return tab_id
+            raise BrowserNotConnectedError(f"指定的浏览器 Tab 不存在: {tab_id}")
         if self._default_tab_id and self._default_tab_id in self._tabs:
             return self._default_tab_id
         alive = [t for t in self._tabs.values() if t.url]

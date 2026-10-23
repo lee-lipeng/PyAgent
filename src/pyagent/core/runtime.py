@@ -404,7 +404,9 @@ class Runtime:
             search_dirs.append((project_skills_dir, "project"))
 
         # 扫描并加载
-        skills, diagnostics = discovery.discover(search_dirs)
+        # SkillDiscovery 保留首个同名技能，因此先扫描高优先级来源。
+        # project > user > builtin，和配置文件的覆盖优先级一致。
+        skills, diagnostics = discovery.discover(list(reversed(search_dirs)))
 
         # 注册到 manager（同名冲突由 manager.register 处理）
         for skill in skills:

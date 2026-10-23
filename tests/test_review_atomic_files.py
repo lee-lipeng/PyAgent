@@ -51,3 +51,20 @@ async def test_atomic_successful_write_and_edit(tmp_path):
     )
     assert not written.is_error and not edited.is_error
     assert target.read_text(encoding="utf-8") == "new"
+
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX 权限位测试")
+@pytest.mark.asyncio
+async def test_atomic_edit_preserves_existing_permissions(tmp_path):
+    import stat
+
+    target = tmp_path / "script.sh"
+    target.write_text("echo old", encoding="utf-8")
+    target.chmod(0o751)
+    result = await EditFileTool().execute(
+        "id", {"path": str(target), "old_string": "old", "new_string": "new"}
+    )
+
+    assert not result.is_error
+    assert stat.S_IMODE(target.stat().st_mode) == 0o751

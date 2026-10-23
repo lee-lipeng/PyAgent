@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import tempfile
 from collections.abc import Callable
 from typing import Any
@@ -42,6 +43,9 @@ def _atomic_write_text(path, content: str) -> None:
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
+        if path.exists():
+            # 保留现有文件的可执行位及权限位，避免编辑后脚本无法执行。
+            os.chmod(temp_path, stat.S_IMODE(path.stat().st_mode))
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
