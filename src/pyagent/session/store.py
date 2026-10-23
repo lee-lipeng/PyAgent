@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -56,7 +58,18 @@ class SessionStore:
             return None
 
         path = self._session_path(session.metadata.id)
-        session.to_file(path)
+        # 临时文件与目标文件处于同一目录，写入成功后原子替换旧会话。
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{session.metadata.id}.", suffix=".tmp", dir=self._dir
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            session.to_file(temp_path)
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
         logger.debug("保存会话: %s", path)
         return path
 
