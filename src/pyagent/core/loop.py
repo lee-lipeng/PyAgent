@@ -396,6 +396,16 @@ class AgentLoop:
                         )
                     )
 
+                # 即使工具提示终止，也必须优先尊重执行期间收到的中止信号。
+                if ctx.is_cancelled():
+                    await self.agent.dispatch(EventType.AGENT_ABORT, turns=turns)
+                    return LoopResult(
+                        success=False,
+                        final_response=final_response,
+                        turns=turns,
+                        stop_reason="cancelled",
+                    )
+
                 # turn 边界：drain steering 队列
                 # 所有工具结果已落库，消息配对完整，此时注入用户补充输入。
                 # steer 只在 turn 边界生效，不打断工具执行。

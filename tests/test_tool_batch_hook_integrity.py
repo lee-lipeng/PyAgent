@@ -109,3 +109,30 @@ async def test_before_tool_argument_rewrite_persisted_after_execution():
     arguments = session.messages[1].tool_calls[0]["function"]["arguments"]
     assert '"path": "effective.txt"' in arguments
     assert session.messages[2].tool_call_id == "id-1"
+
+
+class AbortDuringToolExecutor:
+    async def execute_batch(self, calls, signal=None):
+        # 工具执行过程中用户发出中止，但工具同时返回 terminate=True。
+        signal.set()
+        return [ToolResult(content="已提前终止", terminate=True)]
+
+
+@pytest.mark.asyncio
+async def test_abort_during_terminating_tool_is_not_reported_as_success():
+    from pyagent.core.context import RuntimeContext
+
+    session = Session.create_new("abort-during-tool")
+    agent = FakeAgent("normal")
+    agent.tool_executor = AbortDuringToolExecutor()
+    context = RuntimeContext(query="开始", session=session)
+
+    result = await AgentLoop(agent).run("开始", session, ctx=context)
+
+    assert result.stop_reason == "cancelled"
+    assert not result.success
+    assert [message.type for message in session.messages] == [
+        "user", "assistant", "tool"
+    ]
+    assert session.messages[1].tool_calls[0]["id"] == session.messages[2].tool_call_id
+    assert session.messages[2].content == "已提前终止"
