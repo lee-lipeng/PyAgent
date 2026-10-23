@@ -26,9 +26,9 @@ from pyagent.core.context_builder import ContextBuilder
 from pyagent.hooks.types import EventType
 from pyagent.llm.token_estimator import ContextUsage
 from pyagent.llm.types import ToolCall
-from pyagent.tools.base import ToolResult
 from pyagent.session import Session
 from pyagent.session.messages import AssistantMessage, ToolResultMessage, UserMessage
+from pyagent.tools.base import ToolResult
 from pyagent.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -242,7 +242,9 @@ class AgentLoop:
                             "function": {
                                 "name": tc.name,
                                 "arguments": (
-                                    tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments)
+                                    tc.arguments
+                                    if isinstance(tc.arguments, str)
+                                    else json.dumps(tc.arguments)
                                 ),
                             },
                         }

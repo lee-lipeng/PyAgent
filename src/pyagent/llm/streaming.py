@@ -48,7 +48,9 @@ class StreamAggregator:
                 # 用 index 作为 key（OpenAI 流式格式中同一工具调用的
                 # 所有片段共享同一 index，id 只在第一个片段出现）
                 key = str(tc.index)
-                builder = self._tool_call_builders.setdefault(key, {"id": "", "name": "", "raw_parts": []})
+                builder = self._tool_call_builders.setdefault(
+                    key, {"id": "", "name": "", "raw_parts": []}
+                )
                 # id 只在第一个片段出现，后续片段 id 为空
                 if tc.id:
                     builder["id"] = tc.id

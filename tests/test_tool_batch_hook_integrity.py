@@ -24,7 +24,9 @@ class FakeLLM:
                 yield None
 
         if self.count == 1:
-            result = LLMResponse(tool_calls=[ToolCall(id="id-1", name="read", arguments={"path": "old"})])
+            result = LLMResponse(
+                tool_calls=[ToolCall(id="id-1", name="read", arguments={"path": "old"})]
+            )
         else:
             result = LLMResponse(content="完成")
         return chunks(), SimpleNamespace(result=lambda: result)
